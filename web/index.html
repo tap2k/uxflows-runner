@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>uxflows runner — Phase 0</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>uxflows runner</h1>
+        <div id="status" class="status idle">
+          <span class="dot"></span>
+          <span class="label">idle</span>
+        </div>
+      </header>
+
+      <section class="phase">
+        <p>
+          Phase 0 — hardcoded greeting, no spec interpretation. Click
+          <strong>Connect</strong>, grant mic permission, and talk to the
+          assistant.
+        </p>
+      </section>
+
+      <section class="controls">
+        <button id="connect" type="button">Connect</button>
+        <button id="disconnect" type="button" disabled>Disconnect</button>
+      </section>
+
+      <section id="errors" class="errors" hidden></section>
+
+      <section class="audio">
+        <audio id="remote-audio" autoplay playsinline></audio>
+      </section>
+
+      <section class="log">
+        <h2>Log</h2>
+        <pre id="log"></pre>
+      </section>
+    </main>
+    <script type="module" src="/client.js"></script>
+  </body>
+</html>
