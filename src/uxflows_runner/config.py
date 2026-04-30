@@ -31,7 +31,7 @@ class Config:
         if not creds:
             raise RuntimeError(
                 "GOOGLE_APPLICATION_CREDENTIALS not set. Point it at your service-account "
-                "JSON (e.g. examples/hello/credentials.json). See README."
+                "JSON (e.g. data/credentials.json). See README."
             )
         if not Path(creds).is_file():
             raise RuntimeError(f"GOOGLE_APPLICATION_CREDENTIALS path does not exist: {creds}")

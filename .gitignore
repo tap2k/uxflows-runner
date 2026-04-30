@@ -9,9 +9,8 @@ wheels/
 # Virtual environments
 .venv
 
-# Credentials — never commit
-examples/**/credentials.json
-examples/**/execution.json
+# Credentials and runtime data — never commit
+data/
 .env
 .env.*
 !.env.example
@@ -20,3 +19,4 @@ examples/**/execution.json
 .DS_Store
 .idea/
 .vscode/
+.claude/

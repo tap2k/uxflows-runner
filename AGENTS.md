@@ -54,7 +54,7 @@ The full layout (current + planned) is in [RUNNER-PLAN.md](./RUNNER-PLAN.md#repo
 
 ## Credentials & Secrets
 
-- Service-account JSON lives at `examples/<spec>/credentials.json`. Gitignored. **Never** commit credentials. **Never** copy them into `../uxflows/` — the editor must not see runtime keys.
+- Service-account JSON lives at `data/credentials.json`. The whole `data/` directory is gitignored. **Never** commit credentials. **Never** copy them into `../uxflows/` — the editor must not see runtime keys. Specs themselves are flat files under `examples/` (e.g. `examples/coffee.json`); credentials are infrastructure, not per-spec content.
 - Env config in `.env` (gitignored). Use `.env.example` as the template.
 - The runner *dispatches to* customer-owned capability backends (HTTP/MCP) and knowledge backends (retrieval); it doesn't *build* them. Authoring those is out of scope.
 
@@ -71,7 +71,7 @@ The full layout (current + planned) is in [RUNNER-PLAN.md](./RUNNER-PLAN.md#repo
 ```sh
 uv sync
 cp .env.example .env  # fill in GOOGLE_CLOUD_PROJECT
-# drop service-account JSON at examples/hello/credentials.json
+# drop service-account JSON at data/credentials.json
 uv run uxflows-runner serve
 ```
 

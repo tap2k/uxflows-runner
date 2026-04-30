@@ -19,8 +19,8 @@ page. Phase 1 will swap the prompt for the v0 dispatcher.
    ```sh
    uv sync
    ```
-3. Drop your GCP service-account JSON into `examples/hello/credentials.json`.
-   This file is gitignored. The service account needs:
+3. Drop your GCP service-account JSON at `data/credentials.json`.
+   The `data/` directory is gitignored. The service account needs:
    - **Vertex AI User** (for Gemini 2.5 Flash)
    - **Cloud Speech Client** (for STT)
    - **Cloud Text-to-Speech User** (for TTS)
@@ -58,7 +58,9 @@ web/
   client.js              # vanilla RTCPeerConnection + getUserMedia
   style.css
 examples/
-  hello/credentials.json # GCP service-account JSON (gitignored)
+  coffee.json            # self-contained order-bot spec (Phase 1 fixture)
+data/
+  credentials.json       # GCP service-account JSON (gitignored)
 ```
 
 Future phases extend this layout (`spec/`, `dispatcher/`, `events/`) per the
