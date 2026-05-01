@@ -3,13 +3,13 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>uxflows runner</title>
+    <title>uxflows runner — audio test</title>
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
     <main>
       <header>
-        <h1>uxflows runner</h1>
+        <h1>audio test</h1>
         <div id="status" class="status idle">
           <span class="dot"></span>
           <span class="label">idle</span>
@@ -17,21 +17,11 @@
       </header>
 
       <section class="phase">
-        <p>
-          Pick a v0 spec JSON, then <strong>Connect</strong> and talk to the
-          agent.
-        </p>
-      </section>
-
-      <section class="spec">
-        <button id="pick-spec" class="ghost" type="button">Load spec…</button>
-        <input id="spec-file" type="file" accept="application/json,.json" hidden />
-        <span id="spec-summary" class="spec-summary">no spec loaded</span>
-        <button id="clear-spec" class="link" type="button" hidden>clear</button>
+        <p>Bare audio loop for testing voices, STT, and VAD.</p>
       </section>
 
       <section class="controls">
-        <button id="connect" type="button" disabled>Connect</button>
+        <button id="connect" type="button">Connect</button>
         <button id="disconnect" type="button" disabled>Disconnect</button>
       </section>
 
@@ -46,6 +36,6 @@
         <pre id="log"></pre>
       </section>
     </main>
-    <script type="module" src="/client.js"></script>
+    <script type="module" src="/audio-test.js"></script>
   </body>
 </html>

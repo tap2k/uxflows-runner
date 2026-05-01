@@ -131,11 +131,14 @@ uxflows-runner/
       schema.py                  # pydantic event types — the runner-side contract
       emitter.py                 # SSE broker, fan-out to subscribers
     server/
-      app.py                     # FastAPI: /api/offer, /api/offer/patch, /run, /stop, /events, /health, static /web
-      pipeline.py                # Pipecat pipeline construction
+      app.py                     # FastAPI: /api/offer (spec-driven), /api/offer/raw (bare), /api/offer/patch, /health, static /web
+      pipeline.py                # Pipecat pipeline construction (spec-driven)
+      pipeline_raw.py            # Bare audio pipeline — hardcoded prompt, no dispatcher
   web/                           # standalone test page served by the runner
-    index.html                   # spec picker, Connect/Disconnect, transcript
+    index.html                   # spec picker, Connect/Disconnect, log
     client.js                    # vanilla RTCPeerConnection — no SDK, no CDN
+    audio-test.html              # bare audio debug page (no spec)
+    audio-test.js                # bare audio client; posts to /api/offer/raw
     style.css
   examples/
     coffee.json                  # self-contained order-bot spec (Phase 1 fixture)
@@ -214,6 +217,36 @@ Constraints this rule imposes on the dispatcher:
 
 The plan accommodates an escape hatch: if a flow genuinely needs sequential reasoning (e.g., capability invocation whose result must influence the same turn's response), it can opt into a two-call turn explicitly. This is *not* the default and is not in v0.
 
+#### Gemini tool-call shape (probe results, 2026-04-30)
+
+Confirmed before building `prompt_builder.py` via `scripts/probe_gemini_tools.py` against gemini-2.5-flash on Vertex with a coffee.json-shaped tool list (`take_exit_path` variants + `trigger_interrupt`):
+
+- **`function_calling_config.mode = "AUTO"` returns both assistant text and a tool call in the same response** (separate `parts[]` on the single candidate). One forward pass, both signals — the "one LLM call per turn" rule is fully achievable on Gemini, no two-call dance.
+- **`mode = "ANY"` suppresses the text part** — only the `function_call` comes back. So AUTO is the dispatcher's default; ANY is reserved for forced-decision moments where we don't need an utterance (e.g., `max_turns` auto-routing to the unconditional sad exit).
+- **Parts ordering is not guaranteed.** The processor must iterate `candidate.content.parts` and collect text + function_call independently, not index by position.
+- **Enum-typed parameters are honored.** `drink_type` populates only on coffee/tea routes, omitted on walkaway. v0 string-defaults remain fine; typed-parameter v0.5 will lift quality further.
+- **Routing accuracy is good** even on ambiguous input ("what do you have?" correctly fires `trigger_interrupt: int_menu` rather than hallucinating a route). Bundling `take_exit_path` + `trigger_interrupt` in one tool list works.
+
+#### Live-test follow-up (2026-04-30 evening)
+
+The probe captured the *happy path* (text + tool call together). Live testing revealed an asymmetry between the two tools:
+
+- **`take_exit_path` reliably emits text + tool together** — the model treats routing as a side-effect on top of the natural reply. Live confirmed: "I'd love a latte" → assistant says "Got it, what size?" *and* fires `take_exit_path(xp_greet_to_coffee)` in the same response.
+- **`trigger_interrupt` tends to emit the tool call alone** — the model treats the interrupt as the response. Tested twice on "what do you have?" → both times Gemini fired `trigger_interrupt(int_menu)` with **no text part**, leaving the patron in silence. Stronger prompting ("never call a tool silently", added at the top of the system prompt and to the tool description) didn't move the behavior.
+
+**Decision: trigger_interrupt + return_to_caller get a follow-up `LLMRunFrame`** pushed by the handler, after the system prompt + tools have been re-synced for the new active flow. This costs a second LLM inference on those turns. Acceptable: interrupts are rare; the alternative (silence on the interrupt turn) is unshippable. `take_exit_path` does NOT get a follow-up — the model's same-response text is reliable for routing decisions, and the new flow speaks on the next user turn anyway.
+
+If we ever swap to a different LLM where `trigger_interrupt` reliably comes with text (Claude, GPT-5), drop the follow-up. The branch in the handler is one `if`; cheap to flip.
+
+**Known walkaway gap (not yet fixed):** the same "tool-call-without-text" pattern also bites `take_exit_path` on **session-terminal exits** — `xp_greet_walkaway` and other `next_flow_id: null` paths. Live test 2026-04-30: user said "Maybe I'll come back another time" → agent replied "No problem, I hope to see you back soon!" but did NOT fire `take_exit_path(xp_greet_walkaway)`. The conversation stayed in `flow_greet` and the `cap_log_walkaway` action never fired. The model treats "graceful goodbye" as a complete textual response, not a routing event.
+
+This is harder to backstop than the interrupt case because by the time we'd notice (no tool fired), the assistant has already said "have a nice day" — there's no follow-up turn. Possible fixes (none implemented):
+- **Strengthen tool description** — "Always call this when ending the conversation, even on a graceful goodbye." Risk: makes Gemini call walkaway too eagerly on mild deflections.
+- **PostLLMResolver classification step** — second small LLM call after silent turns: "did the agent just end the conversation?" If yes, fire the unconditional sad/walkaway exit. Cost: extra inference on every silent turn.
+- **Wait for non-Gemini LLM** — Claude / GPT-5 are likely to handle this naturally given their better text+tool discipline.
+
+Logged as a v0 rough edge. Not a blocker for the visual demo (the canvas still highlights flow_greet, accurately reflecting state) but is a blocker for any production use where post-walkaway logging matters.
+
 ### Schema coverage
 
 What v0 schema fields the runner honors, with explicit punts. Keeps Phase 1 from quietly dropping behavior.
@@ -253,7 +286,8 @@ In v0, the dispatcher implements:
 - Stack-based `FlowState`: top of stack is the active flow; interrupts push, `return_to_caller` pops.
 - Assigns: `direct` (literal), `calculation` (expression eval against variable bag), `llm` (structured extraction). Evaluated when an exit fires, scoped to the chosen exit path. Emits `variable_set` events. Interrupt triggering does *not* fire the interrupted flow's assigns or actions.
 - Routing: evaluate `routing.exit_paths` in order; `calculation` short-circuits, fall through to `llm` evaluation as a function-tool decision (bundled into the per-turn call), `direct` is unconditional. Terminal on `type: "exit"` or `next_flow_id: null`.
-- Interrupts: per turn, collect interrupt-typed flows whose `scope` matches the active flow (or is `["global"]`). Evaluate `entry_condition`: `calculation`/`direct` short-circuit; `llm` triggers bundled into the per-turn call as `trigger_interrupt` tool variants. LLM picks at most one of `take_exit_path | trigger_interrupt`.
+- Interrupts: per turn, collect interrupt-typed flows whose `scope` matches the active flow (or is `["global"]`). Evaluate `entry_condition`: `calculation`/`direct` short-circuit; `llm` triggers bundled into the per-turn call as `trigger_interrupt` tool variants.
+- **Decision precedence per turn** — when more than one signal fires, the dispatcher resolves in this order: (1) `trigger_interrupt` (from LLM tool call) — an off-path detour wins; the routing decision will be re-evaluated when the interrupt pops via `return_to_caller`. (2) `calculation`/`direct` shortcut on an exit path — deterministic, beats LLM exit picks. (3) `take_exit_path` (from LLM tool call). (4) Stay in the active flow. Rationale: interrupts represent real user intent that's orthogonal to routing; honoring them first avoids "I asked what's on the menu and got hustled into a coffee order anyway."
 - `chatbot_initiates`: drives whether the agent or user opens the first turn.
 - `max_turns`: per-flow turn counter on the active stack frame; interrupted turns do not count; exhaustion auto-routes to the unconditional sad exit path.
 - Variables: in-memory dict keyed by name; agent-level and flow-level both flat in the same bag for v0.
@@ -262,6 +296,19 @@ In v0, the dispatcher implements:
 ### Browser audio glue
 
 A small TS module in the editor establishes an `RTCPeerConnection` and exchanges SDP via `POST /api/offer` (mirroring the standalone `web/` client). Mic capture via `getUserMedia`, TTS playback via an `<audio>` element bound to the inbound track. No frontend audio processing of our own — Pipecat's pipeline handles VAD, format conversion, etc.
+
+### Audio-only debug surface (`web/audio-test.html` + `/api/offer/raw`)
+
+Sibling to the main test page: a **bare audio loop with a hardcoded prompt — no spec, no dispatcher**. Connects to a stripped-down Pipecat pipeline (`pipeline_raw.py`) that's essentially what shipped in Phase 0 before the dispatcher landed.
+
+Why it exists: when something feels off in the audio path — voice quality, STT mistakes, VAD jitter, a new TTS provider — the dispatcher is in the way. This page isolates the layer below cognition. Use it for:
+
+- **Voice / TTS A-Bs** — swap `UXFLOWS_TTS_VOICE`, hear the difference without spec interference.
+- **STT or VAD changes** — confirm fidelity without flow transitions cluttering the log.
+- **Provider swaps at the audio layer** — point at Deepgram instead of Google STT, validate with one page reload.
+- **First-pass triage** when a live conversation goes wrong — does the issue reproduce here? If yes, it's audio. If no, it's the dispatcher.
+
+Stays minimal forever — vanilla HTML/JS, no spec picker, no event log, no UI knobs (those land per-experiment). Reachable directly at `http://localhost:8000/audio-test.html` (no link from the main page; debug surface, not navigation).
 
 ### Provider stack default
 
@@ -313,28 +360,122 @@ Stand up the audio loop end-to-end with a hardcoded prompt. No spec involvement 
 
 **Audio transport**: `SmallWebRTCTransport` server-side, vanilla `RTCPeerConnection` in the browser. SDP exchange happens over a single `POST /api/offer` endpoint (plus `POST /api/offer/patch` for ICE). The browser stack handles encoding, jitter buffering, AEC, and bidirectional audio for free; no Pipecat browser SDK, no protobuf serializer, no npm/CDN deps. Pipecat's WebSocket transport remains available if telephony or constrained environments need it later.
 
-### Phase 1 — v0 dispatcher (4–6 days)
+## Pipecat wiring (the v0 dispatcher's framework seam)
 
-Replace the hardcoded prompt with a spec-driven flow interpreter.
+The dispatcher core (methods, expressions, routing, assigns, capabilities, prompt_builder) is framework-agnostic — already built and tested. This section pins down the *seam* between that core and Pipecat's frame pipeline. Three things to nail before code:
 
-- `spec/types.py` — pydantic models mirroring SCHEMA.md v0. Validate against `../uxflows/public/example.json` as the test fixture.
-- `spec/loader.py` — load + validate JSON. Resolve `entry_flow_id`. Build flow + capability-by-name lookup tables. Build interrupt-flows-by-scope index for fast per-turn lookup.
-- `dispatcher/flow_state.py` — `FlowState` class with a flow stack (each frame: flow id, variable bag inheritance, turn counter, language). Top of stack is active. Helpers for push (interrupt trigger), pop (`return_to_caller`), peek.
-- `dispatcher/prompt_builder.py` — `build_system_prompt(flow, agent, lang) -> str`. Compose `agent.system_prompt` + agent guardrails + agent FAQ (per-language scripts when present) + agent glossary + flow `instructions` + flow guardrails + flow FAQ + flow `scripts[lang]` (joined). Also computes the per-turn tool schema: `take_exit_path` variants + `trigger_interrupt` variants for applicable interrupts (matched by `scope`).
-- `dispatcher/methods.py` — `evaluate(method_spec, vars, llm) -> value`. Branches by method.
-- `dispatcher/expressions.py` — minimal expression engine: variable refs (bare names), equality, comparison, `and`/`or`/`not`, regex (via the `pattern` field on `calculation`-method conditions). Lean on `simpleeval` or similar; do not write a parser.
-- `dispatcher/assigns.py` — when an exit path fires, evaluate its `assigns` block: `direct`/`calculation` evaluated locally, `llm` reads pre-bundled values from the per-turn LLM call's tool result. Update variable bag. Emit `variable_set` events.
-- `dispatcher/routing.py` — given active flow + variables, evaluate `exit_paths` in order. Also evaluates applicable interrupts' `entry_condition`s; `calculation`/`direct` short-circuit, `llm` becomes `trigger_interrupt` tool variants in the per-turn LLM call. Returns one of: `(stay)`, `(take_exit, exit_path_id)`, `(trigger_interrupt, interrupt_flow_id, caller_flow_id)`, or `(return_to_caller, popped_flow_id)`. Terminal on `type: "exit"` or `next_flow_id: null`.
-- `dispatcher/capabilities.py` — `invoke(capability_name, agent) -> result`. Resolves by `name` from the catalog. Implicit input resolution: reads `capabilities[name].inputs` and pulls values from the variable bag at fire-time. v0: HTTP POST only; `kind: retrieval` returns empty context.
-- `dispatcher/processor.py` — Pipecat `FrameProcessor` subclass. At session start, honor `agent.chatbot_initiates` (push entry flow prompt + elicit immediate turn, or wait for user). On `LLMFullResponseEndFrame`:
-  - **Stay** → no transition, increment active-frame turn counter
-  - **Take exit** → fire chosen exit path's assigns and actions, transition (push new flow or pop on terminal)
-  - **Trigger interrupt** → push interrupt flow, do *not* fire interrupted flow's assigns/actions, do *not* increment caller's turn counter
-  - **Return to caller** → pop, rebuild prompt from caller's flow
+### 1. Where `plan()` is called per turn
 
-  On transition, push `LLMMessagesUpdateFrame`. On caller-flow `max_turns` exhaustion (counter only ticks for non-interrupted turns), force the unconditional sad exit.
-- `tests/test_interrupts.py` — global-scope, scoped, nested, return-to-caller, max_turns counter behavior.
-- **Acceptance:** Run against `example.json`. The agent's first turn matches the entry flow's `instructions` (or the user opens, per `chatbot_initiates`). Routing transitions to the right next flow. Exit-path assigns fire and emit `variable_set` events. Post-exit actions fire. Terminal exits end the session cleanly. `max_turns` exhaustion auto-routes (interrupted turns don't count). Saying an interrupt trigger phrase pushes the interrupt flow, returns to the caller on `return_to_caller`. CLI logs show events. Canvas not yet wired.
+A small **PreLLMPlanner** processor sits between `context_aggregator.user()` and `GoogleVertexLLMService` in the pipeline. On each `LLMContextFrame` (the user's turn arriving at the LLM), it:
+1. Calls `routing.plan(spec, state.active_flow_id, state.variables, in_interrupt=state.is_in_interrupt)`.
+2. Stashes the resulting `RoutingPlan` on the shared `Session` so the tool handlers can read it during resolve.
+3. Calls `prompt_builder.build_tools(plan)`. If non-None, mutates the `LLMContext.tools` directly (cleaner than pushing `LLMSetToolsFrame` mid-stream — the context the LLM is about to consume already has the right tools). If None, clears tools.
+4. Lets the `LLMContextFrame` continue downstream unchanged.
+
+Confirmed via source-read: `GoogleLLMService` pulls tools from the context per-inference (line 300 of `pipecat/services/google/llm.py`: `tools = params["tools"]`), so direct mutation is sufficient. `LLMSetToolsFrame` would also work — both aggregators (user/assistant) handle it via `set_tools()` which mutates the same shared context — but pushing a frame from a processor sitting upstream of the LLM is a longer code path than just touching the context we already hold.
+
+### 2. How tool callbacks feed `resolve()`
+
+**The registered tool handler IS the resolver.** Pipecat fires `LLMFullResponseEndFrame` *before* function-call handlers complete — both in `run_in_parallel=True` (handlers spawn as background tasks) and `run_in_parallel=False` (handlers go on a queue serviced by a separate sequential-runner task). Source: `LLMService.run_function_calls()` returns after spawning/enqueueing, never awaits handler completion; the Google service then unconditionally pushes the end frame in its `finally` block. So a "PostLLMResolver" listening on the end frame would race the handlers and lose.
+
+The clean answer: collapse the resolve step into the handler.
+
+Two functions registered on the LLM service via `register_function`:
+
+- **`take_exit_path`** handler: the LLM has emitted (a) `exit_path_id` plus optional per-LLM-assign params and (b) the assistant text in the same response. Handler runs `routing.resolve(session.current_plan, spec, {"take_exit_path": params.arguments})` to produce a `Decision`. Branches:
+  - `take_exit` → fire `assigns`, dispatch `actions` via `CapabilityDispatcher`, call `state.transition()` (or `state.end()` on terminal), push `LLMMessagesUpdateFrame` with the new flow's system prompt and `LLMSetToolsFrame` with the new tool list. Emit events.
+  - `end` → state.end(), emit `session_ended{agent_terminal}`, queue an `EndFrame` to stop the pipeline after current TTS drains.
+  - Calc shortcut already won → handler is moot; just suppress run_llm.
+- **`trigger_interrupt`** handler: same shape — `routing.resolve(...)` returns `trigger_interrupt`, handler does `state.push_interrupt()`, builds the interrupt flow's prompt + tools, pushes update frames.
+
+Both handlers finish with `params.result_callback({}, properties=FunctionCallResultProperties(run_llm=False))` to suppress automatic re-inference.
+
+What about turns when the LLM emits **no** tool call (e.g., calc shortcut + no interrupt, or just a stay)? The handlers don't fire. We need a backstop. Options:
+  - **Catch-all handler** registered with `function_name=None` — fires for any tool the LLM calls that we didn't register. Doesn't help here (no tool was called).
+  - **Listen for `LLMFullResponseEndFrame`** in a separate processor and resolve only when no tool was called this turn. Race-free because we're not racing handlers — by the time the end frame fires, if no handler is going to run, the resolver can act.
+  - **`AssistantContextAggregator`'s `on_context_updated` event** fires after the assistant's full turn is committed — also race-free.
+
+Use the second option: a small **PostLLMResolver** that fires on `LLMFullResponseEndFrame` *and* checks whether any handler ran (via a flag on the Session set by the handlers). If a handler ran, the resolver no-ops. If not, the resolver runs the "stay" branch — increment turn counter, check `max_turns`, possibly force the unconditional sad fallback (which then fires `take_exit` synthetically, re-entering the same code paths as the handler-driven branch).
+
+This is a 30-line processor and keeps the design honest: handlers handle their case; the end-frame backstop handles "no tool called."
+
+### 3. How the system prompt is swapped on flow transition
+
+After a transition (take_exit / trigger_interrupt / return_to_caller), the resolver calls `prompt_builder.build_system_prompt(agent, new_flow, lang)` and pushes an `LLMMessagesUpdateFrame(messages=[{"role": "system", "content": new_prompt}], run_llm=False)`. The next user turn picks up the new system prompt automatically; the LLM's context history (assistant text + user transcripts so far) is preserved by `LLMContext` — only the system message is replaced.
+
+`run_llm=False` everywhere is load-bearing: the dispatcher decides when to run the LLM by letting normal user turns flow through the pipeline. We never want a context update or tool-set frame to trigger a synthetic inference.
+
+### Session — the shared state object
+
+A `Session` dataclass holds everything per-call: `LoadedSpec`, `FlowState`, `LLMContext`, `CapabilityDispatcher`, `current_plan`, `tool_handler_fired_this_turn` (a bool the handlers flip and the PostLLMResolver checks), `event_emitter`. Both processors and the tool handlers close over the same instance. Single owner, no globals, cleaned up on disconnect.
+
+```
+                       Session (per-connection)
+                       ├─ LoadedSpec
+                       ├─ FlowState (stack + variable bag)
+                       ├─ LLMContext (Pipecat's own)
+                       ├─ CapabilityDispatcher
+                       ├─ current_plan (set by PreLLMPlanner each turn)
+                       ├─ tool_handler_fired_this_turn (bool, reset each user turn)
+                       └─ event_emitter
+
+  transport.in → stt → context_agg.user → [PreLLMPlanner] → llm → tts → transport.out → context_agg.assistant
+                                              │                ↑                                          ↑
+                                              │                │ tool handlers                            │ end-frame backstop
+                                              │                │ (resolve + transition)                   │ (handles "stay")
+                                              │                ↓                                          │
+                                              │           [PostLLMResolver listens for LLMFullResponseEndFrame, no-op if any handler ran this turn]
+                                              │
+                                              └─ mutates LLMContext.tools per turn
+
+  Tool handlers (take_exit_path, trigger_interrupt) registered on the LLM service:
+    - run resolve() with the plan stashed by PreLLMPlanner
+    - fire assigns + capability actions on take_exit
+    - mutate FlowState (transition / push_interrupt / pop_to_caller / end)
+    - push LLMMessagesUpdateFrame for the new flow's system prompt
+    - mutate LLMContext.tools for next turn (or schedule that for the next PreLLMPlanner pass)
+    - call result_callback(run_llm=False) to suppress automatic re-inference
+```
+
+### What this buys
+
+- **No custom LLM-service subclass** — we use `GoogleVertexLLMService` as-is and let Pipecat's adapter translate `FunctionSchema` → Gemini function declarations (already validated in §"Gemini tool-call shape").
+- **Two small processors plus two tool handlers, all stateless apart from the shared Session.** PreLLMPlanner ~30 LOC; PostLLMResolver ~30 LOC (just the "stay/max_turns" backstop); each tool handler ~50 LOC (resolve + transition + frame push). Handlers contain the meat of the dispatch logic — that's the right place for it given Pipecat's ordering guarantees.
+- **The "one LLM call per turn" rule is enforced structurally**: tool handlers call `result_callback(run_llm=False)`, all our state-mutation frames push with `run_llm=False`. The LLM only runs when normal user turns arrive via the pipeline.
+- **The dispatcher core stays untouched.** This section is purely about how Pipecat invokes it.
+
+### Probe findings (2026-04-30)
+
+Both unknowns from the original sketch resolved by source-read of `pipecat/services/llm_service.py` and `pipecat/services/google/llm.py`:
+
+- **Q1: Tool swap mid-pipeline.** ✅ Works. The universal aggregator handles `LLMSetToolsFrame` by calling `set_tools()` which mutates `LLMContext._tools`. The Google LLM service reads `tools` from the context per-inference, so the next turn picks up the new schema. (We choose to mutate `LLMContext.tools` directly from PreLLMPlanner instead of pushing a frame — same effect, fewer hops.)
+- **Q2: Handler vs end-frame ordering.** ⚠️ The end frame fires *before* handlers complete in both `run_in_parallel=True` (default — handlers spawn as background tasks) and `run_in_parallel=False` (handlers go to a queue serviced by a separate background task). `run_function_calls()` returns immediately after spawning/enqueueing; the Google service then unconditionally pushes `LLMFullResponseEndFrame` in its `finally` block. **Conclusion: a resolver that listens only on the end frame would race the handlers.** Design adjusted: handler-as-resolver, with the end frame used only as a backstop for "no tool was called."
+
+### Phase 1 — v0 dispatcher ✅ shipped 2026-04-30
+
+Replaced the hardcoded prompt with a spec-driven flow interpreter. The runner now loads a v0 spec on session start, composes per-flow system prompts + per-turn tool schemas, evaluates routing through three-method dispatch, fires assigns and capabilities on exit, transitions flows, and runs interrupts with stack-based push/pop.
+
+Modules shipped (all in `src/uxflows_runner/`):
+- `spec/types.py`, `spec/loader.py` — pydantic models + per-spec lookup tables (flows by id, capabilities by name and id, interrupts by scope).
+- `dispatcher/flow_state.py` — stack-based `FlowState` with per-frame turn counters; interrupted turns don't count toward the caller's `max_turns`.
+- `dispatcher/expressions.py` — minimal `simpleeval`-based calculation engine; supports `==`, comparisons, `and`/`or`/`not`, regex (`pattern` subtype). Missing variables resolve to `None` so partial bags evaluate cleanly.
+- `dispatcher/methods.py` — three-method evaluator (`direct` / `calculation` / `llm`) for both conditions and assigns.
+- `dispatcher/routing.py` — two-phase: `plan()` short-circuits calc/direct exits + collects LLM candidates and applicable interrupts; `resolve()` consumes the LLM tool-call payload to pick one of `stay | take_exit | trigger_interrupt | return_to_caller | end`. Decision precedence: trigger_interrupt > shortcut > take_exit > stay.
+- `dispatcher/assigns.py` — fires per-exit, mutates variable bag, returns `AssignResult` rows the processor turns into `variable_set` events.
+- `dispatcher/capabilities.py` — fire-and-forget HTTP POST for `kind: function`; retrieval stub. Inputs resolved implicitly from `capabilities[].inputs`. Sibling `execution.json` config.
+- `dispatcher/prompt_builder.py` — composes system prompt (agent + flow + per-language scripts) and per-turn tool schema (`take_exit_path` + `trigger_interrupt`).
+- `dispatcher/processor.py` — the Pipecat seam. `PreLLMPlanner` mutates `LLMContext` per turn; `take_exit_path` / `trigger_interrupt` handlers run the resolve → assigns → capabilities → state transition pipeline; `PostLLMResolver` is a backstop for "no tool fired" turns (`max_turns` auto-route). `trigger_interrupt` and `return_to_caller` push a fresh `LLMRunFrame` so the new flow speaks immediately (Gemini quirk; see §"Live-test follow-up").
+- `events/schema.py`, `events/emitter.py` — pydantic event types + `LoggingEventEmitter` (Phase 1) + `QueueEventEmitter` (Phase 2-ready).
+- `server/app.py` — `POST /api/offer` accepts `body.spec` (full v0 JSON) per session, falls back to `UXFLOWS_SPEC_PATH`. 1MB body cap. Sibling `/api/offer/raw` for the bare audio debug page.
+- `server/pipeline.py` — Pipecat pipeline with PreLLMPlanner + tool handlers + PostLLMResolver wired in.
+
+Tests: 80 passing across types/loader, expressions, methods, routing, assigns, capabilities, prompt_builder, flow_state, interrupts (end-to-end stack semantics including global/scoped/nested interrupts and max_turns interaction).
+
+Acceptance bar (live test against `examples/coffee.json` over headphone audio): agent greets via entry flow, routes coffee/tea correctly via llm-method exits, fires `place_order` action on confirm, interrupts work (`int_menu` push + return), events log cleanly. Canvas not yet wired (Phase 2).
+
+Known rough edges, both documented above:
+- **Walkaway gap** — terminal `take_exit_path` not always firing when Gemini decides "graceful goodbye" is text-only. See §"Live-test follow-up".
+- **No turn_started/turn_completed events yet** — deferred to Phase 2 alongside the SSE broker, since the only consumer (transcript panel) is editor-side and the event shape (full vs. partial deltas) is better designed alongside the panel.
 
 ### Phase 2 — editor wiring + canvas highlight (2–3 days)
 
@@ -372,14 +513,6 @@ The visual payoff phase. By now the runner emits a clean event stream that the s
 - **Spec validation drift.** Pydantic types mirror SCHEMA.md by hand; they will drift. Mitigate by running editor-exported JSON through the runner's loader as a CI test once the runner has CI.
 - **Multi-process state on Run.** v0 assumes one runner process per editor session, single-user. Don't add session-isolation primitives until needed; they're all reversible.
 
-## Decision dependencies
-
-Three things to nail before starting Phase 0:
-
-1. **Provider stack confirmed.** Default proposal: Deepgram + OpenAI + Cartesia. Open to substitutions but pick now and move; switching mid-build is a half-day each.
-2. **Runner repo location.** Proposal: `../uxflows-runner/` sibling. Alternative: nested under `whatsupp2/runner/` to share its Python environment and get closer to the simulator. Decision drives import paths.
-3. **Local-only vs. tunneled.** v0 is `localhost`-only. No Cloudflare/ngrok tunnel. Demo target is the laptop running both editor and runner. This collapses one whole class of network/permissions issues; revisit if a buyer demo across networks emerges.
-
 ## Out of scope for v0
 
 **v0.5 — immediately after v0 ships:**
@@ -388,6 +521,7 @@ Three things to nail before starting Phase 0:
 - **Session event log persistence.** Append the event stream to JSONL on disk. Cheap; unlocks replay and offline analysis at near-zero cost. (The replay UI itself is editor-side and follows when there's demand.)
 
 **Post-v0:**
+- **Local-only vs. tunneled.** v0 is `localhost`-only. No Cloudflare/ngrok tunnel. Demo target is the laptop running both editor and runner. This collapses one whole class of network/permissions issues; revisit if a buyer demo across networks emerges.
 - **Phone telephony / Patter integration.** Browser is the v0 demo target. Patter (or Pipecat's Daily transport) swaps in as the audio adapter when a deployment requires PSTN. Dispatcher unchanged.
 - **Bidirectional control plane.** Pause / step / inject user input via websocket. Debugging UX, not v0.
 - **Multi-session / multi-user runner.** v0 is single-user, single-session, localhost. SaaS shape is a bigger decision than the runner.

@@ -1,9 +1,9 @@
 """Pipecat pipeline construction.
 
-Phase 0: hardcoded system prompt, Google STT/LLM/TTS, SmallWebRTC transport
-(plain WebRTC peer connection — browser uses RTCPeerConnection + getUserMedia,
-no protobuf framing required). The dispatcher (spec interpreter) lands in
-Phase 1 and slots in between context_aggregator.user() and the LLM.
+Phase 1: spec-driven dispatcher slotted between context_aggregator.user() and
+the LLM. The PreLLMPlanner mutates LLMContext per turn (system prompt + tools)
+based on the active flow; tool handlers do the routing + state mutation; the
+PostLLMResolver handles plain-text turns where no tool fired.
 """
 
 from __future__ import annotations
@@ -25,15 +25,25 @@ from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 
 from uxflows_runner.config import Config
-
-PHASE_0_SYSTEM_PROMPT = (
-    "You are a friendly voice assistant in a Phase 0 demo. "
-    "Greet the user warmly when the conversation starts, then have a short, "
-    "natural conversation. Keep replies under two sentences."
+from uxflows_runner.dispatcher.capabilities import CapabilityDispatcher, load_execution_config
+from uxflows_runner.dispatcher.processor import (
+    PostLLMResolver,
+    PreLLMPlanner,
+    add_capability_result_listener,
+    register_dispatcher_tools,
 )
+from uxflows_runner.dispatcher.prompt_builder import build_system_prompt
+from uxflows_runner.dispatcher.session import Session
+from uxflows_runner.events.emitter import LoggingEventEmitter
+from uxflows_runner.spec.loader import LoadedSpec
 
 
-async def run_session(connection: SmallWebRTCConnection, config: Config) -> None:
+async def run_session(
+    connection: SmallWebRTCConnection,
+    config: Config,
+    spec: LoadedSpec,
+    execution_config_path: str | None = None,
+) -> None:
     """Run a single voice session bound to one WebRTC peer connection."""
     transport = SmallWebRTCTransport(
         webrtc_connection=connection,
@@ -56,17 +66,45 @@ async def run_session(connection: SmallWebRTCConnection, config: Config) -> None
         settings=GoogleVertexLLMService.Settings(model=config.llm_model),
     )
 
-    context = LLMContext(messages=[{"role": "system", "content": PHASE_0_SYSTEM_PROMPT}])
+    # Compose the entry flow's prompt up front; PreLLMPlanner re-syncs each
+    # turn so this is just a sane starting state.
+    entry_flow = spec.entry_flow
+    lang = spec.agent.meta.languages[0] if spec.agent.meta.languages else "en-US"
+    initial_prompt = build_system_prompt(spec.agent, entry_flow, lang)
+    context = LLMContext(messages=[{"role": "system", "content": initial_prompt}])
     context_aggregator = LLMContextAggregatorPair(context)
+
+    # Capability dispatch — sibling execution.json keyed by capability name.
+    endpoints = (
+        load_execution_config(execution_config_path) if execution_config_path else {}
+    )
+    capabilities = CapabilityDispatcher(spec=spec, endpoints=endpoints)
+
+    events = LoggingEventEmitter()
+    session = Session.start(
+        spec=spec,
+        llm_context=context,
+        events=events,
+        capabilities=capabilities,
+        language=lang,
+    )
+    add_capability_result_listener(session)
+
+    register_dispatcher_tools(llm, session)
+
+    pre = PreLLMPlanner(session)
+    post = PostLLMResolver(session)
 
     pipeline = Pipeline(
         [
             transport.input(),
             stt,
             context_aggregator.user(),
+            pre,
             llm,
             tts,
             transport.output(),
+            post,
             context_aggregator.assistant(),
         ]
     )
@@ -81,13 +119,23 @@ async def run_session(connection: SmallWebRTCConnection, config: Config) -> None
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(_transport, _client):
-        logger.info("client connected — kicking off greeting")
-        context.add_message({"role": "user", "content": "Say hello and ask how you can help."})
-        await task.queue_frames([LLMRunFrame()])
+        logger.info(
+            "client connected — entry_flow={} agent={}",
+            entry_flow.id,
+            spec.agent.id,
+        )
+        session.emit_session_started()
+        session.emit_flow_entered(entry_flow.id, via="entry")
+        if spec.agent.chatbot_initiates:
+            # Kick the agent off — it should produce the entry flow's opening
+            # naturally from the system prompt + scripts.
+            context.add_message({"role": "user", "content": "(begin)"})
+            await task.queue_frames([LLMRunFrame()])
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(_transport, _client):
         logger.info("client disconnected — cancelling pipeline")
+        await capabilities.aclose()
         await task.cancel()
 
     runner = PipelineRunner(handle_sigint=False)

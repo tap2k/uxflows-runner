@@ -15,7 +15,7 @@
         "text"
       ]
     },
-    "system_prompt": "You are Skye, a friendly barista at Bluebird Coffee taking orders. Keep replies short and conversational — one or two sentences, the way a real barista talks. Bluebird sells coffee drinks (drip, americano, latte) and tea (black, green, herbal). Pastries pair with a drink. If a patron asks for something off-menu, say so politely and offer the closest item.",
+    "system_prompt": "You are Skye, a friendly barista at Bluebird Coffee taking orders. Keep replies short and conversational — one or two sentences, the way a real barista talks. Bluebird sells coffee drinks (drip, americano, latte) and tea (black, green, herbal) — that's the whole menu. If a patron asks for something else (pastries, food, smoothies, anything), say so politely and offer the closest drink we do carry.",
     "chatbot_initiates": true,
     "variables": {
       "drink_type": {
@@ -74,7 +74,11 @@
       },
       {
         "id": "gr_no_offmenu",
-        "statement": "Bluebird only sells coffee, tea, and pastries. Politely decline anything else (food, smoothies, alcohol) and offer the closest item we do carry."
+        "statement": "Bluebird only sells coffee and tea. Politely decline anything else (food, smoothies, alcohol, pastries) and offer the closest item we do carry — drip, americano, latte, or black/green/herbal tea."
+      },
+      {
+        "id": "gr_no_inventing_items",
+        "statement": "Never invent menu items or specifics not listed in the drink menu table. If a patron asks what pastries, syrups, or anything else we have, only mention what's in the table — and if it isn't there, say we don't have it today."
       },
       {
         "id": "gr_recap_before_place",
@@ -223,7 +227,7 @@
       "name": "Greet & route",
       "description": "Welcome the patron and figure out whether they're ordering a coffee or a tea. Self-contained: scripts reference no pre-populated variables.",
       "type": "happy",
-      "instructions": "Open warmly. Ask the patron what they'd like today. From their reply, determine drink_type (coffee or tea). If unclear, ask one short clarifying question and try again. Patrons who only want a pastry: note pastries pair with a drink and offer them coffee or tea.",
+      "instructions": "Open warmly. Ask the patron what they'd like today. From their reply, determine drink_type (coffee or tea). If unclear, ask one short clarifying question and try again. Patrons asking for anything off-menu (pastries, food, smoothies): say we don't carry that and offer coffee or tea.",
       "scripts": {
         "en-US": [
           {
@@ -242,19 +246,31 @@
             "id": "xp_greet_to_coffee",
             "type": "happy",
             "condition": {
-              "expression": "drink_type == \"coffee\"",
-              "method": "calculation"
+              "expression": "Patron has indicated they want a coffee drink (drip, americano, latte, espresso, or any coffee-style beverage).",
+              "method": "llm"
             },
-            "next_flow_id": "flow_coffee_order"
+            "next_flow_id": "flow_coffee_order",
+            "assigns": {
+              "drink_type": {
+                "method": "direct",
+                "value": "coffee"
+              }
+            }
           },
           {
             "id": "xp_greet_to_tea",
             "type": "happy",
             "condition": {
-              "expression": "drink_type == \"tea\"",
-              "method": "calculation"
+              "expression": "Patron has indicated they want tea (black, green, herbal, or any tea variety).",
+              "method": "llm"
             },
-            "next_flow_id": "flow_tea_order"
+            "next_flow_id": "flow_tea_order",
+            "assigns": {
+              "drink_type": {
+                "method": "direct",
+                "value": "tea"
+              }
+            }
           },
           {
             "id": "xp_greet_walkaway",

@@ -6,11 +6,12 @@ dispatcher with self-contained browser test page.
 Plan and rationale: [RUNNER-PLAN.md](./RUNNER-PLAN.md).
 Strategy: [../uxflows/STRATEGY.md](../uxflows/STRATEGY.md).
 
-## Phase 0 status
+## Status
 
-Hello-world voice loop — hardcoded system prompt, no spec interpretation yet.
-Single process serves both the WebRTC peer endpoint and a vanilla HTML test
-page. Phase 1 will swap the prompt for the v0 dispatcher.
+Phase 1 — v0 dispatcher live. Spec-driven flow interpretation, three-method
+routing, interrupts with `return_to_caller`, post-exit capability dispatch.
+The browser test page accepts a v0 spec JSON via file picker or drag-drop;
+the runner parses it per-session and runs the conversation against it.
 
 ## Setup
 
@@ -36,10 +37,10 @@ page. Phase 1 will swap the prompt for the v0 dispatcher.
 uv run uxflows-runner serve
 ```
 
-Then open <http://127.0.0.1:8000> in a Chromium-based browser, click
-**Connect**, grant microphone permission, and start talking. The agent
-greets you first; ASR/LLM/TTS happen on the runner; audio flows over
-WebRTC.
+Then open <http://127.0.0.1:8000> in a Chromium-based browser. Drop or
+pick a v0 spec JSON (e.g. `examples/coffee.json`), click **Connect**,
+grant microphone permission, and start talking. The agent greets you
+first; ASR/LLM/TTS happen on the runner; audio flows over WebRTC.
 
 `curl localhost:8000/health` returns `{"ok": true}` once the server has
 loaded credentials.

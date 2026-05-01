@@ -1,5 +1,5 @@
-// Browser client — vanilla WebRTC, no Pipecat client lib.
-// Captures mic, exchanges SDP + spec with the runner, plays remote TTS audio.
+// Bare audio test — no spec, no dispatcher. Used to iterate on voices,
+// STT, VAD, and the audio path without spec interpretation in the way.
 
 const $ = (id) => document.getElementById(id);
 const statusEl = $("status");
@@ -9,15 +9,9 @@ const logEl = $("log");
 const connectBtn = $("connect");
 const disconnectBtn = $("disconnect");
 const remoteAudio = $("remote-audio");
-const pickSpecBtn = $("pick-spec");
-const clearSpecBtn = $("clear-spec");
-const specFileInput = $("spec-file");
-const specSummary = $("spec-summary");
 
 let pc = null;
 let localStream = null;
-let currentSpec = null;  // parsed spec object, or null
-let currentSpecName = null;  // filename for display
 
 const log = (msg) => {
   const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
@@ -38,52 +32,6 @@ const showError = (msg) => {
 const clearError = () => {
   errorsEl.hidden = true;
   errorsEl.textContent = "";
-};
-
-const updateSpecUI = () => {
-  if (currentSpec) {
-    const flowCount = (currentSpec.flows || []).length;
-    const agentId = currentSpec.agent?.id || "(no id)";
-    specSummary.textContent = `${currentSpecName} — ${agentId}, ${flowCount} flows`;
-    specSummary.classList.add("loaded");
-    clearSpecBtn.hidden = false;
-    connectBtn.disabled = pc !== null;
-  } else {
-    specSummary.textContent = "no spec loaded";
-    specSummary.classList.remove("loaded");
-    clearSpecBtn.hidden = true;
-    connectBtn.disabled = true;
-  }
-};
-
-const loadSpecFromText = (text, name) => {
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch (err) {
-    showError(`couldn't parse JSON: ${err.message}`);
-    return false;
-  }
-  if (!parsed || typeof parsed !== "object" || !parsed.agent || !Array.isArray(parsed.flows)) {
-    showError("spec must be an object with `agent` and `flows` fields");
-    return false;
-  }
-  currentSpec = parsed;
-  currentSpecName = name;
-  clearError();
-  log(`loaded spec: ${name}`);
-  updateSpecUI();
-  return true;
-};
-
-const loadSpecFromFile = async (file) => {
-  if (!file) return;
-  try {
-    const text = await file.text();
-    loadSpecFromText(text, file.name);
-  } catch (err) {
-    showError(`couldn't read file: ${err.message}`);
-  }
 };
 
 async function connect() {
@@ -129,25 +77,18 @@ async function connect() {
   for (const track of localStream.getTracks()) {
     pc.addTrack(track, localStream);
   }
-  // Pipecat's SmallWebRTC transport expects the answerer to send audio back —
-  // but adding a recvonly audio transceiver explicitly avoids edge cases where
-  // the offer omits it.
   pc.addTransceiver("audio", { direction: "sendrecv" });
 
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
-  log("posting offer");
+  log("posting offer to /api/offer/raw");
 
   let answer;
   try {
-    const offerBody = { sdp: offer.sdp, type: offer.type };
-    if (currentSpec) {
-      offerBody.spec = currentSpec;
-    }
-    const res = await fetch("/api/offer", {
+    const res = await fetch("/api/offer/raw", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(offerBody),
+      body: JSON.stringify({ sdp: offer.sdp, type: offer.type }),
     });
     if (!res.ok) {
       const detail = await res.text();
@@ -187,22 +128,4 @@ disconnectBtn.addEventListener("click", () => {
   teardown();
 });
 
-pickSpecBtn.addEventListener("click", () => specFileInput.click());
-specFileInput.addEventListener("change", (e) => {
-  loadSpecFromFile(e.target.files[0]);
-  specFileInput.value = "";  // allow re-picking the same file
-});
-
-clearSpecBtn.addEventListener("click", () => {
-  currentSpec = null;
-  currentSpecName = null;
-  clearError();
-  log("spec cleared");
-  updateSpecUI();
-});
-
-// Initial state — no spec yet, Connect disabled.
-updateSpecUI();
-
-// Tear down on tab close so the runner sees a clean disconnect.
 window.addEventListener("beforeunload", teardown);
