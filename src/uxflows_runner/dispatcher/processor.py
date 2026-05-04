@@ -131,66 +131,74 @@ def _replace_system_message(context: Any, new_prompt: str) -> None:
 
 
 def register_dispatcher_tools(llm: LLMService, session: Session) -> None:
-    """Register `take_exit_path` and `trigger_interrupt` on the LLM service."""
+    """Register `take_exit_path` and `trigger_interrupt` on the LLM service.
+
+    Pipecat-mode glue: thin wrappers around `apply_tool_call` (the framework-
+    agnostic core) plus the Pipecat-specific result_callback + LLMRunFrame
+    follow-up. Text mode (server/text_session.py) calls `apply_tool_call`
+    directly with its own follow-up mechanism.
+    """
 
     async def _take_exit_path(params: FunctionCallParams) -> None:
-        await _handle_tool(
-            params,
-            session,
-            llm_results={"take_exit_path": dict(params.arguments)},
+        decision = await apply_tool_call(session, "take_exit_path", dict(params.arguments))
+        await params.result_callback(
+            {}, properties=FunctionCallResultProperties(run_llm=False)
         )
+        if decision is not None and decision.kind in ("trigger_interrupt", "return_to_caller"):
+            await params.llm.push_frame(LLMRunFrame())
 
     async def _trigger_interrupt(params: FunctionCallParams) -> None:
-        await _handle_tool(
-            params,
-            session,
-            llm_results={"trigger_interrupt": dict(params.arguments)},
+        decision = await apply_tool_call(session, "trigger_interrupt", dict(params.arguments))
+        await params.result_callback(
+            {}, properties=FunctionCallResultProperties(run_llm=False)
         )
+        if decision is not None and decision.kind in ("trigger_interrupt", "return_to_caller"):
+            await params.llm.push_frame(LLMRunFrame())
 
     llm.register_function("take_exit_path", _take_exit_path)
     llm.register_function("trigger_interrupt", _trigger_interrupt)
 
 
-async def _handle_tool(
-    params: FunctionCallParams,
-    session: Session,
-    llm_results: dict[str, Any],
-) -> None:
+async def apply_tool_call(
+    session: Session, tool_name: str, args: dict[str, Any]
+) -> routing_mod.Decision | None:
+    """Framework-agnostic core of dispatch: resolve LLM tool args into a
+    Decision, mutate session state (assigns, capabilities, flow stack, events),
+    and re-plan the active flow if a transition happened.
+
+    Returns the Decision so the caller can decide whether a follow-up LLM
+    inference is needed. `trigger_interrupt` and `return_to_caller` need one
+    (Gemini AUTO mode reliably emits text + tool together on `take_exit_path`,
+    but tends to emit ONLY the function call on interrupts — silence to the
+    patron. We tried prompt + tool-description mandates; they don't reliably
+    override the model's instinct that an interrupt-style off-path question
+    is *itself* the answer. The 2-call-per-interrupt cost is acceptable given
+    interrupts are rare. take_exit transitions don't need a follow-up: the
+    LLM answered this turn, and the new flow speaks on the NEXT user turn
+    per RUNNER-PLAN's "routing is next-turn" rule.)
+
+    Voice mode pushes an LLMRunFrame for the follow-up; text mode does a
+    second generate_content call inline.
+
+    Returns None if the tool call arrived without a current_plan (guard
+    against PreLLMPlanner not having run).
+    """
     s = session
     s.tool_handler_fired_this_turn = True
 
     if s.current_plan is None:
-        # The LLM emitted a tool call without a plan having been built —
-        # shouldn't happen if PreLLMPlanner ran, but guard anyway.
         logger.warning("tool handler fired without a current_plan; ignoring")
-        await params.result_callback(
-            {}, properties=FunctionCallResultProperties(run_llm=False)
-        )
-        return
+        return None
 
+    llm_results = {tool_name: args}
     decision = routing_mod.resolve(s.current_plan, s.spec, llm_results)
     await _apply_decision(decision, s, llm_results=llm_results)
-    await params.result_callback(
-        {}, properties=FunctionCallResultProperties(run_llm=False)
-    )
 
-    # Trigger an immediate follow-up inference on `trigger_interrupt` and
-    # `return_to_caller`. Gemini AUTO mode reliably emits text + tool call
-    # together on `take_exit_path` (see RUNNER-PLAN §"Gemini tool-call
-    # shape"), but on `trigger_interrupt` it tends to emit ONLY the function
-    # call — silence to the patron. We tried prompt + tool-description
-    # mandates ("never call a tool silently"); they don't reliably override
-    # the model's instinct that an interrupt-style off-path question is
-    # *itself* the answer. The 2-call-per-interrupt cost is acceptable
-    # given interrupts are rare.
-    #
-    # take_exit transitions don't get a follow-up: the LLM answered this
-    # turn, and the new flow speaks on the NEXT user turn (per RUNNER-PLAN
-    # line 212 "routing is next-turn"). Tested this empirically — Gemini
-    # produces text + tool reliably on take_exit_path.
     if decision.kind in ("trigger_interrupt", "return_to_caller"):
+        # Re-plan for the new active flow before its first turn fires.
         plan_for_active_flow(s)
-        await params.llm.push_frame(LLMRunFrame())
+
+    return decision
 
 
 async def _apply_decision(

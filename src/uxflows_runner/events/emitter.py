@@ -48,3 +48,22 @@ class QueueEventEmitter:
 
     def emit(self, event: Event) -> None:
         self.queue.put_nowait(event)
+
+
+class BufferingEventEmitter:
+    """Phase-1.5 (text adapter): collect events in a list, drain on demand.
+
+    Used by TextSession to return the events fired during a turn alongside
+    the agent's reply in a single JSON response. `drain()` swaps the buffer
+    for a fresh list and returns the old one — caller-owned, atomic.
+    """
+
+    def __init__(self) -> None:
+        self._buffer: list[Event] = []
+
+    def emit(self, event: Event) -> None:
+        self._buffer.append(event)
+
+    def drain(self) -> list[Event]:
+        out, self._buffer = self._buffer, []
+        return out

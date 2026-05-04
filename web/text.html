@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>uxflows runner — text chat</title>
+    <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/text.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>uxflows runner — text</h1>
+        <div id="status" class="status idle">
+          <span class="dot"></span>
+          <span class="label">idle</span>
+        </div>
+      </header>
+
+      <section class="phase">
+        <p>
+          Pick a v0 spec JSON, then <strong>Start</strong> and chat with
+          the agent.
+        </p>
+      </section>
+
+      <section class="spec">
+        <button id="pick-spec" class="ghost" type="button">Load spec…</button>
+        <input id="spec-file" type="file" accept="application/json,.json" hidden />
+        <span id="spec-summary" class="spec-summary">no spec loaded</span>
+        <button id="clear-spec" class="link" type="button" hidden>clear</button>
+      </section>
+
+      <section class="apikey">
+        <label for="api-key">API key (optional):</label>
+        <input id="api-key" type="password" placeholder="AIza... (leave blank for env credentials)" autocomplete="off" />
+      </section>
+
+      <section class="controls">
+        <button id="start" type="button" disabled>Start</button>
+        <button id="reset" type="button" disabled>Reset</button>
+      </section>
+
+      <section id="errors" class="errors" hidden></section>
+
+      <section class="transcript">
+        <div id="transcript" class="transcript-body"></div>
+      </section>
+
+      <section class="composer">
+        <textarea id="composer" rows="2" placeholder="Type a message — ⌘↵ to send" disabled></textarea>
+        <button id="send" type="button" disabled>Send</button>
+      </section>
+    </main>
+    <script type="module" src="/text.js"></script>
+  </body>
+</html>

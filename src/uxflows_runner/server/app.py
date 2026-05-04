@@ -1,8 +1,9 @@
-"""FastAPI app — SmallWebRTC offer endpoint + static test page.
+"""FastAPI app — SmallWebRTC offer endpoint + text chat endpoints + static test page.
 
 Surface:
   GET  /                  — static test page (web/index.html)
   GET  /audio-test.html   — bare audio debug page (no spec, hardcoded prompt)
+  GET  /text.html         — text chat debug page (no audio, BYOK key)
   GET  /health            — liveness probe
   POST /api/offer         — WebRTC SDP exchange; body MAY include `spec` (a
                             full v0 spec JSON object) to drive THIS session.
@@ -11,6 +12,10 @@ Surface:
                             with a hardcoded system prompt — no spec, no
                             dispatcher. Debug surface for voices / STT / VAD.
   POST /api/offer/patch   — ICE candidate patch (shared between both offer paths)
+  POST /api/chat/session  — start a text session (BYOK Google AI Studio key);
+                            returns session_id + opening turn + events
+  POST /api/chat/turn     — send a user turn, get agent reply + events
+  POST /api/chat/end      — tear down a text session early
 """
 
 from __future__ import annotations
@@ -19,12 +24,13 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.request_handler import (
@@ -34,8 +40,15 @@ from pipecat.transports.smallwebrtc.request_handler import (
 )
 
 from uxflows_runner.config import Config
+from uxflows_runner.dispatcher.capabilities import load_execution_config
 from uxflows_runner.server.pipeline import run_session
 from uxflows_runner.server.pipeline_raw import run_raw_session
+from uxflows_runner.server.text_registry import TextSessionRegistry
+from uxflows_runner.server.text_session import (
+    DEFAULT_MODEL,
+    SessionAlreadyEnded,
+    TextSession,
+)
 from uxflows_runner.spec.loader import LoadedSpec, load_spec, parse_spec
 
 
@@ -57,6 +70,8 @@ async def lifespan(app: FastAPI):
     app.state.default_spec = load_spec(app.state.config.spec_path)
     app.state.webrtc = SmallWebRTCRequestHandler()
     app.state.tasks = set()
+    app.state.text_sessions = TextSessionRegistry()
+    app.state.text_sessions.start_sweeper()
     logger.info(
         "uxflows-runner ready (default_spec={} agent={} model={} voice={} project={})",
         app.state.config.spec_path,
@@ -66,6 +81,8 @@ async def lifespan(app: FastAPI):
         app.state.config.google_project_id,
     )
     yield
+    await app.state.text_sessions.stop_sweeper()
+    await app.state.text_sessions.drop_all()
     await app.state.webrtc.close()
 
 
@@ -154,6 +171,101 @@ async def webrtc_patch(request: Request):
     body = await request.json()
     req = SmallWebRTCPatchRequest(**body)
     await app.state.webrtc.handle_patch_request(req)
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# Text chat endpoints (Phase 1.5 — see SIMULATE-PLAN.md §"Wire protocol")
+# --------------------------------------------------------------------------
+
+
+class StartSessionRequest(BaseModel):
+    spec: dict[str, Any] | None = None
+    api_key: str | None = None
+    model: str | None = None
+    language: str | None = None
+
+
+class StartSessionResponse(BaseModel):
+    session_id: str
+    agent_text: str
+    events: list[dict[str, Any]]
+    ended: bool
+
+
+class TurnRequest(BaseModel):
+    session_id: str
+    user_text: str = Field(..., min_length=1)
+
+
+class TurnResponse(BaseModel):
+    agent_text: str
+    events: list[dict[str, Any]]
+    ended: bool
+
+
+class EndRequest(BaseModel):
+    session_id: str
+
+
+def _events_to_payload(events: list) -> list[dict[str, Any]]:
+    return [e.model_dump(mode="json") for e in events]
+
+
+@app.post("/api/chat/session", response_model=StartSessionResponse)
+async def chat_start_session(req: StartSessionRequest) -> StartSessionResponse:
+    spec = _resolve_spec(req.spec)
+    endpoints = (
+        load_execution_config(app.state.config.execution_config_path)
+        if app.state.config.execution_config_path
+        else {}
+    )
+    try:
+        ts, opening = await TextSession.start(
+            spec=spec,
+            api_key=req.api_key,
+            model=req.model,
+            language=req.language,
+            execution_endpoints=endpoints,
+            config=app.state.config,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Most likely: invalid API key, network error, or LLM auth failure
+        # during the chatbot_initiates opening turn. Surface the message;
+        # spec-shape errors are caught earlier by _resolve_spec.
+        logger.warning("text session start failed: {}", exc)
+        raise HTTPException(status_code=400, detail=f"session start failed: {exc}")
+
+    app.state.text_sessions.register(ts)
+    events = _events_to_payload(ts.drain_events())
+    return StartSessionResponse(
+        session_id=ts.session_id,
+        agent_text=opening,
+        events=events,
+        ended=ts.ended,
+    )
+
+
+@app.post("/api/chat/turn", response_model=TurnResponse)
+async def chat_turn(req: TurnRequest) -> TurnResponse:
+    ts = app.state.text_sessions.get(req.session_id)
+    if ts is None:
+        raise HTTPException(status_code=404, detail="unknown session_id")
+    try:
+        agent_text = await ts.turn(req.user_text)
+    except SessionAlreadyEnded as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("text session turn failed (session={}): {}", req.session_id, exc)
+        raise HTTPException(status_code=500, detail=f"turn failed: {exc}")
+
+    events = _events_to_payload(ts.drain_events())
+    return TurnResponse(agent_text=agent_text, events=events, ended=ts.ended)
+
+
+@app.post("/api/chat/end")
+async def chat_end(req: EndRequest) -> dict[str, bool]:
+    await app.state.text_sessions.drop(req.session_id)
     return {"ok": True}
 
 

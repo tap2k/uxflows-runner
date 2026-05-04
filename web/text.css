@@ -1,0 +1,115 @@
+/* Text chat page — additive on top of style.css */
+
+.muted {
+  color: #888;
+  font-size: 0.85rem;
+}
+
+.apikey {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+}
+
+.apikey label {
+  font-size: 0.85rem;
+  color: #555;
+  white-space: nowrap;
+}
+
+.apikey input {
+  flex: 1;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 0.9rem;
+}
+
+.transcript {
+  margin: 1rem 0;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background: #fafafa;
+  height: 50vh;
+  overflow-y: auto;
+}
+
+.transcript-body {
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.bubble {
+  max-width: 85%;
+  padding: 0.5rem 0.75rem;
+  border-radius: 10px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.bubble.user {
+  align-self: flex-end;
+  background: #d8e6ff;
+  color: #1a3a6e;
+}
+
+.bubble.agent {
+  align-self: flex-start;
+  background: #fff;
+  border: 1px solid #e2e2e2;
+  color: #222;
+}
+
+.events {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.72rem;
+  color: #777;
+  margin: -0.2rem 0 0.4rem 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.event-row {
+  display: flex;
+  gap: 0.3rem;
+}
+
+.event-arrow {
+  color: #aaa;
+}
+
+.event-name {
+  color: #5a7d3a;
+  font-weight: 600;
+}
+
+.event-detail {
+  color: #888;
+}
+
+.composer {
+  display: flex;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+}
+
+.composer textarea {
+  flex: 1;
+  padding: 0.5rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 0.9rem;
+  resize: vertical;
+}
+
+.composer button {
+  align-self: stretch;
+  padding: 0 1.2rem;
+}

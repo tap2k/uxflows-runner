@@ -232,16 +232,24 @@ Confirmed before building `prompt_builder.py` via `scripts/probe_gemini_tools.py
 
 The probe captured the *happy path* (text + tool call together). Live testing revealed an asymmetry between the two tools:
 
-- **`take_exit_path` reliably emits text + tool together** — the model treats routing as a side-effect on top of the natural reply. Live confirmed: "I'd love a latte" → assistant says "Got it, what size?" *and* fires `take_exit_path(xp_greet_to_coffee)` in the same response.
+- **`take_exit_path` USUALLY emits text + tool together** — the model treats routing as a side-effect on top of the natural reply. Live confirmed: "I'd love a latte" → assistant says "Got it, what size?" *and* fires `take_exit_path(xp_greet_to_coffee)` in the same response. **But not always** — see "silent take_exit" below.
 - **`trigger_interrupt` tends to emit the tool call alone** — the model treats the interrupt as the response. Tested twice on "what do you have?" → both times Gemini fired `trigger_interrupt(int_menu)` with **no text part**, leaving the patron in silence. Stronger prompting ("never call a tool silently", added at the top of the system prompt and to the tool description) didn't move the behavior.
 
-**Decision: trigger_interrupt + return_to_caller get a follow-up `LLMRunFrame`** pushed by the handler, after the system prompt + tools have been re-synced for the new active flow. This costs a second LLM inference on those turns. Acceptable: interrupts are rare; the alternative (silence on the interrupt turn) is unshippable. `take_exit_path` does NOT get a follow-up — the model's same-response text is reliable for routing decisions, and the new flow speaks on the next user turn anyway.
+**Decision: trigger_interrupt + return_to_caller get a follow-up `LLMRunFrame`** pushed by the handler, after the system prompt + tools have been re-synced for the new active flow. This costs a second LLM inference on those turns. Acceptable: interrupts are rare; the alternative (silence on the interrupt turn) is unshippable. `take_exit_path` does NOT get a follow-up in voice mode (yet — see "silent take_exit" below).
 
 If we ever swap to a different LLM where `trigger_interrupt` reliably comes with text (Claude, GPT-5), drop the follow-up. The branch in the handler is one `if`; cheap to flip.
 
-**Known walkaway gap (not yet fixed):** the same "tool-call-without-text" pattern also bites `take_exit_path` on **session-terminal exits** — `xp_greet_walkaway` and other `next_flow_id: null` paths. Live test 2026-04-30: user said "Maybe I'll come back another time" → agent replied "No problem, I hope to see you back soon!" but did NOT fire `take_exit_path(xp_greet_walkaway)`. The conversation stayed in `flow_greet` and the `cap_log_walkaway` action never fired. The model treats "graceful goodbye" as a complete textual response, not a routing event.
+##### Silent take_exit (text mode fixed 2026-05-04, voice mode TODO)
 
-This is harder to backstop than the interrupt case because by the time we'd notice (no tool fired), the assistant has already said "have a nice day" — there's no follow-up turn. Possible fixes (none implemented):
+Live testing during Phase 1.5 surfaced a third sibling of this family: **`take_exit_path` sometimes emits a tool call with NO text** — usually but not always; per a quick eyeballing on `examples/coffee.json`, maybe ~30% of routing turns. State mutates correctly; the user just gets nothing to read.
+
+**Text mode fix (shipped):** [`TextSession._run_one_turn`](src/uxflows_runner/server/text_session.py) issues a single follow-up inference with **tools dropped** (`include_tools=False`) when `decision.kind == "take_exit"` and the original turn returned no text. Tools-dropped is structurally safe — the model can only produce text, can't chain another transition, can't fire a premature cancel/confirm. Capped at one follow-up per turn. Live test 2026-05-04: previously-empty `agent_text` for "i'd like a latte" now returns "Got it. And what size would you like for that latte?"
+
+**Voice mode TODO:** Same pattern applies in voice — silence after the user says "i'd like a latte" is worse UX than an empty text bubble. The fix is structurally similar: in `_take_exit_path` handler, after `apply_tool_call` returns a take_exit Decision, if no text frame fired this turn, push an `LLMRunFrame()` for the follow-up — but with tools cleared (e.g. `s.llm_context.set_tools(NOT_GIVEN)` before the frame, then re-plan after). Needs a small `LLMTextFrame` listener to set a `text_emitted_this_turn` flag on Session. Estimated ~15 LOC. Worth doing once text mode has been used enough to validate the no-tools-followup pattern doesn't surprise.
+
+**Known walkaway gap (not yet fixed):** distinct from silent take_exit — here Gemini emits NEITHER a text-only goodbye NOR a `take_exit_path` call. Live test 2026-04-30: user said "Maybe I'll come back another time" → agent replied "No problem, I hope to see you back soon!" but did NOT fire `take_exit_path(xp_greet_walkaway)`. The conversation stayed in `flow_greet` and the `cap_log_walkaway` action never fired. The model treats "graceful goodbye" as a complete textual response, not a routing event.
+
+This is harder to backstop than silent-take_exit because by the time we'd notice (no tool fired), the assistant has already said "have a nice day" — there's no transition for a follow-up to attach to. Possible fixes (none implemented):
 - **Strengthen tool description** — "Always call this when ending the conversation, even on a graceful goodbye." Risk: makes Gemini call walkaway too eagerly on mild deflections.
 - **PostLLMResolver classification step** — second small LLM call after silent turns: "did the agent just end the conversation?" If yes, fire the unconditional sad/walkaway exit. Cost: extra inference on every silent turn.
 - **Wait for non-Gemini LLM** — Claude / GPT-5 are likely to handle this naturally given their better text+tool discipline.
@@ -478,6 +486,34 @@ Known rough edges, both documented above:
 - **Walkaway gap** — terminal `take_exit_path` not always firing when Gemini decides "graceful goodbye" is text-only. See §"Live-test follow-up".
 - **No turn_started/turn_completed events yet** — deferred to Phase 2 alongside the SSE broker, since the only consumer (transcript panel) is editor-side and the event shape (full vs. partial deltas) is better designed alongside the panel.
 
+### Phase 1.5 — text I/O adapter ✅ shipped 2026-05-04
+
+Brought forward from "Out of scope for v0" because the editor needed a text-chat surface ahead of the editor's canvas highlighting, and the runner's voice path requires GCP service-account credentials that aren't always available locally. Driven by [`SIMULATE-PLAN.md`](../uxflows/SIMULATE-PLAN.md) in the editor repo.
+
+**What shipped:**
+- `events/emitter.py` — added `BufferingEventEmitter` (collect events in a list, drain on demand).
+- `dispatcher/processor.py` — extracted `apply_tool_call(session, tool_name, args) -> Decision` from `_handle_tool`. Pipecat tool handlers became 3-line wrappers around it; voice behavior byte-identical (80 existing tests still pass). Text mode calls `apply_tool_call` directly.
+- `server/text_session.py` — `TextSession` class. Constructs `LLMContext` and Pipecat's LLM service standalone (no pipeline); per turn calls `_run_inference()` (one `generate_content`), parses text + function_calls from response parts, dispatches via `apply_tool_call`, runs a follow-up inference inline for `trigger_interrupt`/`return_to_caller` (the same Gemini quirk voice mode handles via `LLMRunFrame`).
+- `server/text_registry.py` — in-memory session dict + idle GC sweeper (drops sessions after 30 min inactivity).
+- `server/app.py` — three endpoints: `POST /api/chat/session`, `POST /api/chat/turn`, `POST /api/chat/end`. JSON request/response. CORS already wide-open.
+- `web/text.html` + `web/text.css` + `web/text.js` — vanilla debug page (sibling to `index.html` for voice and `audio-test.html` for bare audio). Spec picker, optional API key field, transcript with inline event annotations. Reachable at `http://localhost:8000/text.html`.
+- `tests/test_text_session.py` — 6 e2e tests against `examples/coffee.json` with mocked `_run_inference`. Cover opening turn, take_exit_path with assigns, plain-reply turns, terminal exit, idempotent end(), context-history shape.
+
+**Path A confirmed (vs. Path B in SIMULATE-PLAN's "architectural question to resolve"):** `GoogleLLMService` (not `GoogleVertexLLMService`) accepts a plain AI Studio API key in its constructor, and `LLMContext` constructs standalone with no pipeline plumbing. Both probed in [`scripts/probe_text_mode.py`](scripts/probe_text_mode.py) before building. The Gemini adapter's `get_llm_invocation_params(context)` does the full `ToolsSchema → function_declarations` translation for free, so text mode shares Pipecat's tool-format conversion with voice mode unchanged.
+
+**Auth — minimal but flexible:** the runner accepts an optional `api_key` in `/api/chat/session`. If provided, uses `GoogleLLMService` with the AI Studio key (BYOK from editor). If omitted, falls back to `GoogleVertexLLMService` against the env service account — same auth voice mode uses. So local dev needs zero new credentials; the editor's BYOK flow still works.
+
+**One refactor seam worth knowing about:** `apply_tool_call` is now the canonical "resolve LLM tool args + mutate state + maybe re-plan" function. Voice mode's `_take_exit_path`/`_trigger_interrupt` handlers wrap it with Pipecat's `result_callback` + `LLMRunFrame` follow-up; text mode calls it directly and does the follow-up via a second `generate_content_async` call. **Both modes share the same dispatch logic.** This is the framework-agnostic boundary [§"Dispatcher must stay framework-agnostic"](#dispatcher-must-stay-framework-agnostic) commits to, made concrete.
+
+**Whatsupp2 integration deliberately not built.** The runner's sessioned shape doesn't match `callAgent`'s stateless contract; making it work needs a session-aware `callAgent` in whatsupp2, not a stateless shim in the runner (which would silently drift on any spec with assigns/transitions). See [SIMULATE-PLAN.md §"Future: whatsupp2 integration"](../uxflows/SIMULATE-PLAN.md#future-whatsupp2-integration) for the full reasoning. The runner's `/api/chat/*` endpoints are already what whatsupp2 will call when that work lands; no runner-side change needed.
+
+**Silent-take_exit follow-up (text mode only, for now):** Live testing surfaced a third sibling of the [§"Live-test follow-up"](#live-test-follow-up-2026-04-30-evening) Gemini quirks — sometimes `take_exit_path` fires with NO text part, just the tool call. State mutates correctly but the user gets nothing to read. The text adapter handles this with a structurally-safe follow-up: if `decision.kind == "take_exit"` AND `text == ""` AND not ended, run ONE more inference with **tools dropped** (`include_tools=False` in `_run_inference`). No tools = no risk of chained transitions or a premature cancel/confirm; the model can only produce words. Capped at one follow-up per turn. **Voice mode does not yet have this fix** — see §"Live-test follow-up" for the voice-side TODO.
+
+**Known limitations carried forward to Phase 2 / 3:**
+- Walkaway gap (Phase 1's existing rough edge) applies to text mode too — Gemini sometimes responds to a graceful-goodbye user turn with text only, no `take_exit_path`, leaving the session "live" until idle GC. Same as voice; not text-specific. (Distinct from the silent-take_exit case above: walkaway = no tool call at all; silent-take_exit = tool call but no text.)
+- Capability HTTP calls fire identically to voice — same `execution.json` (or `execution_endpoints` arg). No special handling.
+- No SSE / streaming — `/api/chat/turn` is request/response by design (one LLM call per turn). Per [SIMULATE-PLAN's "Why request/response"](../uxflows/SIMULATE-PLAN.md#why-requestresponse-not-websocket-or-sse).
+
 ### Phase 2 — editor wiring + canvas highlight (2–3 days)
 
 The visual payoff phase. By now the runner emits a clean event stream that the standalone test page already consumes. This phase adds the editor as a *second* consumer of that stream and renders runtime state on the canvas.
@@ -517,7 +553,7 @@ The visual payoff phase. By now the runner emits a clean event stream that the s
 ## Out of scope for v0
 
 **v0.5 — immediately after v0 ships:**
-- **Text chat testing UI.** Sibling to `web/` — a vanilla page that talks to the runner over a WebSocket text channel instead of WebRTC audio. Useful when you want to iterate on a spec's logic without burning STT/TTS minutes, when you're on a flaky mic, or when reviewing flow transitions visually beats listening. The dispatcher is already mode-agnostic (`agent.meta.modes` toggles voice vs. text per session), so this is a new I/O adapter + a new static page, not new cognitive code. Stays as a debug surface alongside the voice page; both consume the same event stream.
+- **~~Text chat testing UI~~** — landed early as Phase 1.5 above.
 - **Runtime guardrail enforcement.** Currently spec-level metadata only. Adding a post-LLM filter that flags or blocks responses violating guardrails is the runtime evidence behind the "decomposition + auditability" pitch.
 - **Session event log persistence.** Append the event stream to JSONL on disk. Cheap; unlocks replay and offline analysis at near-zero cost. (The replay UI itself is editor-side and follows when there's demand.)
 
