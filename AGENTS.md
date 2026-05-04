@@ -23,12 +23,12 @@ The schema is the contract across all three repos. The runner imports nothing fr
 
 ## Mission
 
-Interpret v0 specs live. **Drive voice (Pipecat pipeline) or text (WebSocket) I/O depending on `agent.meta.modes`**, evaluate flows / captures / routing through the three-method substrate, dispatch to capabilities, and emit a single event stream that multiple consumers read.
+Interpret v0 specs live. **Drive voice (Pipecat WebRTC pipeline) or text (HTTP `/api/chat/*` endpoints) I/O depending on `agent.meta.modes`**, evaluate flows / assigns / routing through the three-method substrate, dispatch to capabilities, and emit a single event stream that multiple consumers read.
 
 Two consumers by design:
 
-1. **Standalone test page** at [web/](./web/) — runner-served debug surface (vanilla `RTCPeerConnection` + `getUserMedia`, no Pipecat browser SDK). Self-contained: one process serves the page and the WebRTC offer endpoint.
-2. **Editor canvas integration** — eventual second consumer of the same event stream; lives in [`../uxflows/`](../uxflows/), not here.
+1. **Standalone debug pages** at [web/](./web/) — runner-served debug surfaces (voice via vanilla `RTCPeerConnection` + `getUserMedia`; text via vanilla `fetch()`; bare audio for STT/VAD triage). Self-contained: one process serves the pages and the API endpoints.
+2. **Editor canvas integration** — eventual second consumer of the same event stream; lives in [`../uxflows/`](../uxflows/), not here. Already consumes the text endpoints via [SIMULATE-PLAN.md](../uxflows/SIMULATE-PLAN.md).
 
 The runner has dual identity: prototyping component when invoked from the editor, simulation substrate when invoked by whatsupp2. One executor, two roles.
 
@@ -46,9 +46,9 @@ For v0, the provider stack is **Google all-three** (Gemini 2.5 Flash via Vertex,
 
 The dispatcher (spec interpreter) **must stay framework-agnostic**. This is the deliberate hedge that lets us swap to Patter for telephony, or reuse the dispatcher inside whatsupp2's text simulator, without rework.
 
-- **Pipecat-specific code is confined to** `src/uxflows_runner/server/pipeline.py` and (when it lands) `src/uxflows_runner/dispatcher/processor.py` (the `FrameProcessor` wrapper).
-- **The rest of the dispatcher** (`methods.py`, `expressions.py`, `captures.py`, `routing.py`, `capabilities.py`, `prompt_builder.py`) imports nothing from Pipecat.
-- **Dispatcher interface**: `dispatch(user_text, flow_state, variables) -> (assistant_text, transitions, events)`.
+- **Pipecat-specific code is confined to** `src/uxflows_runner/server/pipeline.py` (voice pipeline assembly) and `src/uxflows_runner/dispatcher/processor.py` (the `FrameProcessor` wrappers + tool handlers around `apply_tool_call`).
+- **The rest of the dispatcher** (`methods.py`, `expressions.py`, `assigns.py`, `routing.py`, `capabilities.py`, `prompt_builder.py`, `flow_state.py`, `session.py`) imports nothing from Pipecat. Text mode (`server/text_session.py`) drives them directly without a pipeline.
+- **The seam between voice and text:** `apply_tool_call(session, tool_name, args)` in `processor.py` — both modes call it, both modes mutate state through it. Voice wraps it with Pipecat's `result_callback` + `LLMRunFrame` follow-up; text wraps it with a direct `generate_content_async` follow-up.
 
 The full layout (current + planned) is in [RUNNER-PLAN.md](./RUNNER-PLAN.md#repository-layout).
 

@@ -24,6 +24,9 @@ Both are emitted via Pipecat's provider-neutral `FunctionSchema` /
 
 from __future__ import annotations
 
+import re
+from typing import Any
+
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 
@@ -32,7 +35,38 @@ from uxflows_runner.spec.types import Agent, Flow
 from .routing import RoutingPlan
 
 
-def build_system_prompt(agent: Agent, flow: Flow, lang: str) -> str:
+_PLACEHOLDER = re.compile(r"\{(\w+)\}")
+
+
+def substitute_variables(text: str, variables: dict[str, Any] | None) -> str:
+    """Replace {KEY} placeholders against `variables` (case-insensitive).
+
+    Mirrors whatsupp2's resolvePromptVariables semantics: unfilled placeholders
+    (missing key OR empty/null value) stay as `{KEY}` literal in the output.
+    Better to see the unfilled placeholder in the agent's prompt than to
+    silently substitute something else — designers debugging "why did the
+    agent ignore the customer name" can see `{customer_name}` is unfilled
+    at a glance.
+    """
+    if not variables or not text:
+        return text
+    lower = {k.lower(): v for k, v in variables.items()}
+
+    def _replace(match: re.Match) -> str:
+        v = lower.get(match.group(1).lower())
+        if v is None or v == "":
+            return match.group(0)
+        return str(v)
+
+    return _PLACEHOLDER.sub(_replace, text)
+
+
+def build_system_prompt(
+    agent: Agent,
+    flow: Flow,
+    lang: str,
+    variables: dict[str, Any] | None = None,
+) -> str:
     sections: list[str] = []
     if agent.system_prompt:
         sections.append(agent.system_prompt.strip())
@@ -84,7 +118,7 @@ def build_system_prompt(agent: Agent, flow: Flow, lang: str) -> str:
         "any tool; call tools only when their description fits."
     )
 
-    return "\n\n".join(sections)
+    return substitute_variables("\n\n".join(sections), variables)
 
 
 def build_tools(plan: RoutingPlan) -> ToolsSchema | None:

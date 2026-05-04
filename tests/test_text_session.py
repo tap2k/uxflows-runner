@@ -281,6 +281,68 @@ async def test_silent_terminal_take_exit_does_not_trigger_followup(
 
 
 @pytest.mark.asyncio
+async def test_context_vars_seed_variable_bag_without_emitting_events(
+    coffee_spec, monkeypatch
+):
+    """context_vars passed to TextSession.start get merged into the variable
+    bag at session start, but do NOT emit `variable_set` events (those are
+    semantically reserved for exit-path-fired assigns)."""
+    monkeypatch.setattr(
+        TextSession, "_run_inference", _scripted_inference([("Hi Maria!", [])])
+    )
+
+    ts, _ = await TextSession.start(
+        spec=coffee_spec,
+        api_key="dummy",
+        context_vars={"customer_name": "Maria", "loyalty_tier": "gold"},
+    )
+
+    # Bag seeded
+    assert ts.session.state.variables["customer_name"] == "Maria"
+    assert ts.session.state.variables["loyalty_tier"] == "gold"
+
+    # No variable_set events fired — only session start + flow_entered
+    events = ts.drain_events()
+    assert all(type(e).__name__ != "VariableSet" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_context_vars_substituted_into_system_prompt_seen_by_llm(
+    coffee_spec, monkeypatch
+):
+    """End-to-end: seeded context_vars should appear substituted in the
+    system message of the LLMContext that's about to be sent to the model.
+    Verifies both the seeding AND the prompt-builder substitution wire up."""
+    captured_system: list[str] = []
+
+    async def _capture(self, include_tools: bool = True) -> tuple[str, list]:
+        # Snapshot the system message at the moment of inference
+        for msg in self.session.llm_context.messages:
+            if msg.get("role") == "system":
+                captured_system.append(msg["content"])
+                break
+        return ("ok", [])
+
+    monkeypatch.setattr(TextSession, "_run_inference", _capture)
+
+    # coffee.json's agent.system_prompt doesn't have placeholders by default;
+    # patch it to add one for this test.
+    coffee_spec.agent.system_prompt = (
+        coffee_spec.agent.system_prompt + " You are speaking with {customer_name}."
+    )
+
+    await TextSession.start(
+        spec=coffee_spec,
+        api_key="dummy",
+        context_vars={"customer_name": "Maria"},
+    )
+
+    assert len(captured_system) == 1
+    assert "speaking with Maria" in captured_system[0]
+    assert "{customer_name}" not in captured_system[0]
+
+
+@pytest.mark.asyncio
 async def test_assistant_message_with_tool_call_appended_to_context(
     coffee_spec, monkeypatch
 ):

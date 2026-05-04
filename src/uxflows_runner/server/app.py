@@ -184,6 +184,7 @@ class StartSessionRequest(BaseModel):
     api_key: str | None = None
     model: str | None = None
     language: str | None = None
+    context_vars: dict[str, Any] | None = None
 
 
 class StartSessionResponse(BaseModel):
@@ -228,6 +229,7 @@ async def chat_start_session(req: StartSessionRequest) -> StartSessionResponse:
             language=req.language,
             execution_endpoints=endpoints,
             config=app.state.config,
+            context_vars=req.context_vars,
         )
     except Exception as exc:  # noqa: BLE001
         # Most likely: invalid API key, network error, or LLM auth failure

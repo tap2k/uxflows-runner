@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from uxflows_runner.dispatcher import prompt_builder, routing
+from uxflows_runner.dispatcher.prompt_builder import substitute_variables
 from uxflows_runner.spec.loader import load_spec
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -114,3 +115,78 @@ def test_per_language_faq_used():
     assert "abierto de 9 a 17" in es
     assert "open 9-5" in en
     assert "abierto" not in en
+
+
+# --------------------------------------------------------------------------
+# Variable substitution (whatsupp2-parity {KEY} placeholder semantics)
+# --------------------------------------------------------------------------
+
+
+def test_substitute_variables_replaces_filled_keys():
+    out = substitute_variables(
+        "Hi {customer_name}, you have ${balance}.",
+        {"customer_name": "Maria", "balance": 5000},
+    )
+    assert out == "Hi Maria, you have $5000."
+
+
+def test_substitute_variables_leaves_unfilled_placeholders_literal():
+    """Missing-key, None-valued, and empty-string-valued placeholders all
+    stay as `{KEY}` literal — better to surface unfilled state than silently
+    substitute something else (matches whatsupp2's resolvePromptVariables)."""
+    template = "Hello {customer_name}, your account is {account} and tier is {tier}."
+    out = substitute_variables(
+        template, {"customer_name": "Maria", "account": "", "tier": None}
+    )
+    assert out == "Hello Maria, your account is {account} and tier is {tier}."
+
+
+def test_substitute_variables_is_case_insensitive():
+    out = substitute_variables(
+        "Hi {Customer_Name} aka {CUSTOMER_NAME} aka {customer_name}.",
+        {"customer_name": "Maria"},
+    )
+    assert out == "Hi Maria aka Maria aka Maria."
+
+
+def test_substitute_variables_handles_none_and_empty_inputs():
+    assert substitute_variables("hi {name}", None) == "hi {name}"
+    assert substitute_variables("hi {name}", {}) == "hi {name}"
+    assert substitute_variables("", {"name": "x"}) == ""
+
+
+def test_build_system_prompt_substitutes_across_multiple_sections(coffee):
+    """Variables seeded into the variable bag get substituted in agent.system_prompt
+    AND flow.scripts AND any other composed section. Verifies the substitution
+    runs as a final pass over the joined prompt, not per-section."""
+    from uxflows_runner.spec.types import (
+        Agent,
+        AgentMeta,
+        Flow,
+        Routing,
+        Script,
+    )
+
+    agent = Agent(
+        id="agent_x",
+        version="0.1.0",
+        meta=AgentMeta(name="X", purpose="p", client="c"),
+        system_prompt="You are helping {customer_name}.",
+        chatbot_initiates=True,
+        entry_flow_id="f",
+    )
+    flow = Flow(
+        id="f",
+        type="happy",
+        routing=Routing(),
+        instructions="Greet {customer_name} warmly.",
+        scripts={"en-US": [Script(id="s_welcome", text="Welcome, {customer_name}!")]},
+    )
+
+    prompt = prompt_builder.build_system_prompt(
+        agent, flow, lang="en-US", variables={"customer_name": "Maria"}
+    )
+    assert "helping Maria" in prompt
+    assert "Greet Maria warmly" in prompt
+    assert "Welcome, Maria!" in prompt
+    assert "{customer_name}" not in prompt

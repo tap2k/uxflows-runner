@@ -74,6 +74,7 @@ class TextSession:
         language: str | None = None,
         execution_endpoints: dict[str, str] | None = None,
         config: Config | None = None,
+        context_vars: dict[str, Any] | None = None,
     ) -> tuple["TextSession", str]:
         """Construct + run session_started + flow_entered + opening turn (if
         chatbot_initiates). Returns (self, opening_agent_text).
@@ -82,13 +83,17 @@ class TextSession:
         API (BYOK). If omitted, falls back to GoogleVertexLLMService against
         the env service account — same auth voice mode uses, no extra key
         needed for local dev.
+
+        `context_vars` seeds the dispatcher's variable bag at session start
+        — used both for `{KEY}` placeholder substitution in the composed
+        system prompt and as initial values readable by routing conditions /
+        capability inputs. Not emitted as `variable_set` events (those are
+        for exit-path-fired assigns; these are session-start seeds).
         """
         lang = language or (
             spec.agent.meta.languages[0] if spec.agent.meta.languages else "en-US"
         )
         entry_flow = spec.entry_flow
-        initial_prompt = build_system_prompt(spec.agent, entry_flow, lang)
-        context = LLMContext(messages=[{"role": "system", "content": initial_prompt}])
 
         if api_key:
             llm = GoogleLLMService(
@@ -106,6 +111,10 @@ class TextSession:
 
         events = BufferingEventEmitter()
         capabilities = CapabilityDispatcher(spec=spec, endpoints=execution_endpoints or {})
+        # Build LLMContext with a placeholder system message; we'll replace it
+        # below after seeding context_vars so the initial prompt has them
+        # substituted in.
+        context = LLMContext(messages=[{"role": "system", "content": ""}])
         session = Session.start(
             spec=spec,
             llm_context=context,
@@ -113,6 +122,15 @@ class TextSession:
             capabilities=capabilities,
             language=lang,
         )
+        if context_vars:
+            session.state.variables.update(context_vars)
+
+        # Now compose the real initial prompt with seeded variables in scope.
+        initial_prompt = build_system_prompt(
+            spec.agent, entry_flow, lang, variables=session.state.variables
+        )
+        context.messages[0]["content"] = initial_prompt
+
         add_capability_result_listener(session)
 
         ts = cls(session=session, llm=llm, events=events)

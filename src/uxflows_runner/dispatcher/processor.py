@@ -110,7 +110,9 @@ def plan_for_active_flow(s: Session) -> None:
     # LLMContext requires ToolsSchema or NOT_GIVEN — never None.
     s.llm_context.set_tools(tools if tools is not None else NOT_GIVEN)
     active = s.spec.flows_by_id[s.state.active_flow_id]
-    new_prompt = build_system_prompt(s.spec.agent, active, s.state.language)
+    new_prompt = build_system_prompt(
+        s.spec.agent, active, s.state.language, variables=s.state.variables
+    )
     _replace_system_message(s.llm_context, new_prompt)
 
 
@@ -372,7 +374,9 @@ async def _push_new_flow_prompt(s: Session, flow: Flow) -> None:
     next PreLLMPlanner pass sets them fresh. We don't push LLMMessagesUpdateFrame
     here because we already own the LLMContext and can mutate it directly.
     The change takes effect on the next user turn."""
-    new_prompt = build_system_prompt(s.spec.agent, flow, s.state.language)
+    new_prompt = build_system_prompt(
+        s.spec.agent, flow, s.state.language, variables=s.state.variables
+    )
     _replace_system_message(s.llm_context, new_prompt)
     # Tools will be recomputed on the next PreLLMPlanner pass for this new flow.
 
