@@ -106,10 +106,6 @@ examples/
   coffee.json                    # self-contained order-bot spec
 data/
   credentials.json               # GCP service-account JSON (gitignored)
-scripts/
-  probe_gemini_tools.py          # one-shot probe: text+tool-call shape on Vertex Gemini
-  probe_text_mode.py             # one-shot probe: standalone GoogleLLMService + LLMContext
-  probe_pipecat_seam.py          # one-shot probe: tool-handler ordering vs end-frame
 tests/                           # 95 passing — dispatcher core + text-mode e2e
 ```
 

@@ -220,7 +220,7 @@ The plan accommodates an escape hatch: if a flow genuinely needs sequential reas
 
 #### Gemini tool-call shape (probe results, 2026-04-30)
 
-Confirmed before building `prompt_builder.py` via `scripts/probe_gemini_tools.py` against gemini-2.5-flash on Vertex with a coffee.json-shaped tool list (`take_exit_path` variants + `trigger_interrupt`):
+Confirmed before building `prompt_builder.py` via a one-shot probe against gemini-2.5-flash on Vertex with a coffee.json-shaped tool list (`take_exit_path` variants + `trigger_interrupt`):
 
 - **`function_calling_config.mode = "AUTO"` returns both assistant text and a tool call in the same response** (separate `parts[]` on the single candidate). One forward pass, both signals — the "one LLM call per turn" rule is fully achievable on Gemini, no two-call dance.
 - **`mode = "ANY"` suppresses the text part** — only the `function_call` comes back. So AUTO is the dispatcher's default; ANY is reserved for forced-decision moments where we don't need an utterance (e.g., `max_turns` auto-routing to the unconditional sad exit).
@@ -499,7 +499,7 @@ Brought forward from "Out of scope for v0" because the editor needed a text-chat
 - `web/text.html` + `web/text.css` + `web/text.js` — vanilla debug page (sibling to `index.html` for voice and `audio-test.html` for bare audio). Spec picker, optional API key field, transcript with inline event annotations. Reachable at `http://localhost:8000/text.html`.
 - `tests/test_text_session.py` — 6 e2e tests against `examples/coffee.json` with mocked `_run_inference`. Cover opening turn, take_exit_path with assigns, plain-reply turns, terminal exit, idempotent end(), context-history shape.
 
-**Path A confirmed (vs. Path B in SIMULATE-PLAN's "architectural question to resolve"):** `GoogleLLMService` (not `GoogleVertexLLMService`) accepts a plain AI Studio API key in its constructor, and `LLMContext` constructs standalone with no pipeline plumbing. Both probed in [`scripts/probe_text_mode.py`](scripts/probe_text_mode.py) before building. The Gemini adapter's `get_llm_invocation_params(context)` does the full `ToolsSchema → function_declarations` translation for free, so text mode shares Pipecat's tool-format conversion with voice mode unchanged.
+**Path A confirmed (vs. Path B in SIMULATE-PLAN's "architectural question to resolve"):** `GoogleLLMService` (not `GoogleVertexLLMService`) accepts a plain AI Studio API key in its constructor, and `LLMContext` constructs standalone with no pipeline plumbing. Both probed before building. The Gemini adapter's `get_llm_invocation_params(context)` does the full `ToolsSchema → function_declarations` translation for free, so text mode shares Pipecat's tool-format conversion with voice mode unchanged.
 
 **Auth — minimal but flexible:** the runner accepts an optional `api_key` in `/api/chat/session`. If provided, uses `GoogleLLMService` with the AI Studio key (BYOK from editor). If omitted, falls back to `GoogleVertexLLMService` against the env service account — same auth voice mode uses. So local dev needs zero new credentials; the editor's BYOK flow still works.
 
