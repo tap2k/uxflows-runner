@@ -488,7 +488,7 @@ Known rough edges, both documented above:
 
 ### Phase 1.5 — text I/O adapter ✅ shipped 2026-05-04
 
-Brought forward from "Out of scope for v0" because the editor needed a text-chat surface ahead of the editor's canvas highlighting, and the runner's voice path requires GCP service-account credentials that aren't always available locally. Driven by [`SIMULATE-PLAN.md`](../uxflows/SIMULATE-PLAN.md) in the editor repo.
+Brought forward from "Out of scope for v0" because the editor needed a text-chat surface ahead of canvas highlighting, and the runner's voice path requires GCP service-account credentials that aren't always available locally. Driven by editor-side simulate-panel needs.
 
 **What shipped:**
 - `events/emitter.py` — added `BufferingEventEmitter` (collect events in a list, drain on demand).
@@ -499,13 +499,13 @@ Brought forward from "Out of scope for v0" because the editor needed a text-chat
 - `web/text.html` + `web/text.css` + `web/text.js` — vanilla debug page (sibling to `index.html` for voice and `audio-test.html` for bare audio). Spec picker, optional API key field, transcript with inline event annotations. Reachable at `http://localhost:8000/text.html`.
 - `tests/test_text_session.py` — 6 e2e tests against `examples/coffee.json` with mocked `_run_inference`. Cover opening turn, take_exit_path with assigns, plain-reply turns, terminal exit, idempotent end(), context-history shape.
 
-**Path A confirmed (vs. Path B in SIMULATE-PLAN's "architectural question to resolve"):** `GoogleLLMService` (not `GoogleVertexLLMService`) accepts a plain AI Studio API key in its constructor, and `LLMContext` constructs standalone with no pipeline plumbing. Both probed before building. The Gemini adapter's `get_llm_invocation_params(context)` does the full `ToolsSchema → function_declarations` translation for free, so text mode shares Pipecat's tool-format conversion with voice mode unchanged.
+**Path A confirmed (BYOK without Vertex):** `GoogleLLMService` (not `GoogleVertexLLMService`) accepts a plain AI Studio API key in its constructor, and `LLMContext` constructs standalone with no pipeline plumbing. Both probed before building. The Gemini adapter's `get_llm_invocation_params(context)` does the full `ToolsSchema → function_declarations` translation for free, so text mode shares Pipecat's tool-format conversion with voice mode unchanged.
 
 **Auth — minimal but flexible:** the runner accepts an optional `api_key` in `/api/chat/session`. If provided, uses `GoogleLLMService` with the AI Studio key (BYOK from editor). If omitted, falls back to `GoogleVertexLLMService` against the env service account — same auth voice mode uses. So local dev needs zero new credentials; the editor's BYOK flow still works.
 
 **One refactor seam worth knowing about:** `apply_tool_call` is now the canonical "resolve LLM tool args + mutate state + maybe re-plan" function. Voice mode's `_take_exit_path`/`_trigger_interrupt` handlers wrap it with Pipecat's `result_callback` + `LLMRunFrame` follow-up; text mode calls it directly and does the follow-up via a second `generate_content_async` call. **Both modes share the same dispatch logic.** This is the framework-agnostic boundary [§"Dispatcher must stay framework-agnostic"](#dispatcher-must-stay-framework-agnostic) commits to, made concrete.
 
-**Whatsupp2 integration deliberately not built.** The runner's sessioned shape doesn't match `callAgent`'s stateless contract; making it work needs a session-aware `callAgent` in whatsupp2, not a stateless shim in the runner (which would silently drift on any spec with assigns/transitions). See [SIMULATE-PLAN.md §"Future: whatsupp2 integration"](../uxflows/SIMULATE-PLAN.md#future-whatsupp2-integration) for the full reasoning. The runner's `/api/chat/*` endpoints are already what whatsupp2 will call when that work lands; no runner-side change needed.
+**Whatsupp2 integration deliberately not built.** The runner's sessioned shape doesn't match `callAgent`'s stateless contract; making it work needs a session-aware `callAgent` in whatsupp2, not a stateless shim in the runner (which would silently drift on any spec with assigns/transitions). See [§"Future: whatsupp2 integration"](#future-whatsupp2-integration) below for the full reasoning. The runner's `/api/chat/*` endpoints are already what whatsupp2 will call when that work lands; no runner-side change needed.
 
 **Silent-take_exit follow-up:** Live testing surfaced a third sibling of the [§"Live-test follow-up"](#live-test-follow-up-2026-04-30-evening) Gemini quirks — sometimes `take_exit_path` fires with NO text part, just the tool call. State mutates correctly but the user gets nothing to read. The text adapter handles this with a structurally-safe follow-up: if `decision.kind == "take_exit"` AND `text == ""` AND not ended, run ONE more inference with **tools dropped** (`include_tools=False` in `_run_inference`). No tools = no risk of chained transitions or a premature cancel/confirm; the model can only produce words. Capped at one follow-up per turn.
 
@@ -521,11 +521,28 @@ Both gaps are intentional asymmetry, not oversight: text was driven by the edito
 **Known limitations (text + voice both):**
 - Walkaway gap (Phase 1's existing rough edge) applies to text mode too — Gemini sometimes responds to a graceful-goodbye user turn with text only, no `take_exit_path`, leaving the session "live" until idle GC. Same as voice; not text-specific. (Distinct from the silent-take_exit case above: walkaway = no tool call at all; silent-take_exit = tool call but no text.)
 - Capability HTTP calls fire identically to voice — same `execution.json` (or `execution_endpoints` arg). No special handling.
-- No SSE / streaming — `/api/chat/turn` is request/response by design (one LLM call per turn). Per [SIMULATE-PLAN's "Why request/response"](../uxflows/SIMULATE-PLAN.md#why-requestresponse-not-websocket-or-sse).
+- No SSE / streaming — `/api/chat/turn` is request/response by design (one LLM call per turn is the dispatcher's invariant; events arrive inline on the response). A WebSocket would add reconnect/ping/frame overhead for no win; SSE would matter only if we wanted to push background events (e.g. long-running capability returns), which v0 doesn't need. When the editor wants out-of-band capability returns later, this is the natural place to add SSE.
 
-### Phase 2 — editor wiring + canvas highlight (2–3 days)
+**Interrupts unstuck (2026-05-04 follow-up):** Live testing surfaced an interrupt that never returned. Once `int_menu` fired, the conversation stayed inside it forever — the LLM produced text but no routing tool call, because the runner had given it none. `routing.plan` was treating `return_to_caller` as a deterministic *shortcut* (intended to auto-pop the stack), but `text_session`'s "no tool call → return text" early return dropped the shortcut silently before `resolve()` ran. Voice's `PostLLMResolver` had the same gap (only handled `max_turns`, not pending shortcuts).
+
+Fix is two reorders, no new mechanism:
+
+1. **`routing.py` — `return_to_caller` is now an LLM-driven `take_exit_path` candidate.** Appended to `plan.llm_exit_paths` instead of set on `plan.shortcut`. `_build_take_exit` emits `Decision(kind="return_to_caller", ...)` when the picked exit is type `return_to_caller`. The deterministic shortcut path was conceptually wrong anyway: auto-popping on every turn would have killed multi-turn side conversations (patron asks "what's good?" → bot answers → "tell me about the latte" — the auto-pop fires on the first reply and never gets the follow-up). LLM-driven is the right semantics.
+2. **`prompt_builder._exit_path_intent` — `condition.expression` wins over the hardcoded default text** for return paths, same idiom forward exits already use. Spec authors can write a `condition.expression` on a `return_to_caller` exit to articulate *when* the LLM should hand back; default fallback ("naturally complete") preserved for trivial info-lookup interrupts. Updated [`examples/coffee.json`](examples/coffee.json) to use the pattern on `int_menu`'s return path. Schema doc ([../uxflows/SCHEMA.md](../uxflows/SCHEMA.md)) updated to note the field is optional, not absent.
+
+Voice and text share the fix: voice's `_take_exit_path` handler already special-cases `decision.kind == "return_to_caller"` to push an `LLMRunFrame` for the new flow's first response; text's `apply_tool_call` branch does the same with a second `generate_content` inline. No mode-specific work needed.
+
+Tests: 95 → 99 passing. New regression in [tests/test_text_session.py](tests/test_text_session.py) replays the exact reproducer (enter `int_menu`, take a follow-up turn inside it, then return via `take_exit_path` picking the return path).
+
+### Phase 2 — editor wiring + canvas highlight ✅ text-path shipped 2026-05-04
 
 The visual payoff phase. By now the runner emits a clean event stream that the standalone test page already consumes. This phase adds the editor as a *second* consumer of that stream and renders runtime state on the canvas.
+
+**What shipped (text path):** the editor's [SimulatePanel](../uxflows/components/runtime/SimulatePanel.tsx) consumes the runner's `/api/chat/turn` response (events arrive inline per turn, not via SSE). The editor's [`lib/store/simulate.ts`](../uxflows/lib/store/simulate.ts) reduces events into `currentFlowId` / `lastExitEdgeId` / `variables`. [`FlowNode.tsx`](../uxflows/components/canvas/FlowNode.tsx) rings the active flow; [`Canvas.tsx`](../uxflows/components/canvas/Canvas.tsx) pulses the edge on `exit_path_taken`. The MVP-PLAN's "Phase 2 acceptance" — *click Run → canvas lights up the entry flow → talk to the agent → watch nodes change as flows transition* — is met for text-mode sessions.
+
+**Architectural change vs. the original plan below:** SSE broker not built. Per-turn events ride along on the HTTP response from `/api/chat/turn`, which is sufficient for text-mode (one LLM call per turn, ~one batch of events per turn). The original SSE plan was sized for voice, where events arrive asynchronously across a long-lived WebRTC session.
+
+**What's still TBD (voice path):** voice-mode → editor integration. When/if a consumer wants the editor to read voice sessions live (telephony observability, "voice simulate" button), build the SSE broker (`events/emitter.py` `subscribe()`, `GET /events?session_id=...`) and a small `lib/runtime/sseClient.ts` on the editor side. Until then, the original Phase 2 sketch below is preserved as the implementation path:
 
 - `events/schema.py` + `lib/runtime/eventTypes.ts` — define the event types in both languages, kept in sync manually for now (codegen later).
 - `events/emitter.py` — SSE broker class. `subscribe(session_id) -> AsyncIterator[Event]`. Fan-out to multiple subscribers — the standalone page, the editor, eventually replay tools all read the same stream.
@@ -579,3 +596,44 @@ The visual payoff phase. By now the runner emits a clean event stream that the s
 - Where does `execution.json` live? Proposal: alongside the spec, in the runner's working directory. The editor never sees it. (Phase 1.5 added a `execution_endpoints` constructor arg on `TextSession` for editor-driven config; not yet wired through the API.)
 - How does the editor know *which* runner to talk to? v0 assumes `localhost:8000`. Configurable via a setting later.
 - ~~Do we need a session id at all in v0?~~ ✅ Resolved with Phase 1.5 — text adapter requires it (multi-turn HTTP with no transport-level state). Voice mode's per-WebRTC-connection model also implicitly has one. Surfaced explicitly in `/api/chat/session` response.
+
+## Future: whatsupp2 integration
+
+The endpoints Phase 1.5 ships (`/api/chat/session` + `/api/chat/turn`) are *also* the API whatsupp2's agent-testing loop will eventually call when the runner becomes the canonical "agent under test." This section documents that intent and — more importantly — why it's **not** blocking work for the runner, and why no compatibility shim should be added on the runner side to make it look closer.
+
+### The shape mismatch
+
+[`whatsupp2/hooks/simulate.js`](../whatsupp2/hooks/simulate.js)'s `callAgent({agentConfig, messages, persona, apiKeys})` is **stateless** — every call ships the full transcript and gets `{content}` back. The function is pure of session state; the transcript IS the conversation. That's what every external agent endpoint looks like (OpenAI's API, anyone's chatbot endpoint), and it's the contract `execution.endpoint` was designed for ([`AGENT-CLAUDE.md` L42-43](../whatsupp2/AGENT-CLAUDE.md)).
+
+The runner's dispatcher is **stateful by design**. The flow stack, variable bag, and interrupt context are not derivable from the transcript:
+
+- "yes" on turn N can be a routing answer or an interrupt response — the state machine knows which, the transcript doesn't.
+- A `variable_set` may fire on turn 5's exit even though the user said the captured value on turn 1.
+- An interrupt push/pop looks like a digression in text but is structurally distinct in state.
+
+So a "stateless turn endpoint that re-runs the dispatcher each call from the transcript" is **semantically broken** for any non-trivial spec — same input, different routing, different assigns, sometimes different replies than the sessioned path. This would silently produce sim/prod drift, which is exactly what [§"Why a runner at all"](#why-a-runner-at-all) exists to prevent. **Do not add such an endpoint to the runner**, even when asked, even with a docstring warning. The compatibility cost shows up later as evaluation findings nobody can reproduce.
+
+### Where the move has to happen
+
+To wire whatsupp2 cleanly, **`callAgent` evolves to be session-aware** — not the runner reshaping itself to look stateless:
+
+- At conversation start, call `/api/chat/session` once with the snapshot spec from `config_snapshot.spec` and the BYOK key from `apiKeys.google`. Stash `session_id` on `interview.metadata.runner_session_id` (or a dedicated column).
+- Per turn, call `/api/chat/turn { session_id, user_text }` and read `agent_text` + `events`.
+- On `ended: true`, drop the session id; the run loop terminates.
+- The `events` stream is upside — extend the evaluator to consume `exit_path_taken` / `variable_set` / `capability_invoked` once whatsupp2 cares (the `AGENT-CLAUDE.md` "Pending — Capability invocation evaluation" item is exactly this).
+
+This is a real contract change in whatsupp2, not a wrapper:
+- `callAgent`'s signature gains DB access (`interviewId`, `supabase`) to read/write the session id.
+- Four call sites change ([`hooks/simulate.js:117, 487, 837`](../whatsupp2/hooks/simulate.js); [`pages/api/callagent.js:25`](../whatsupp2/pages/api/callagent.js)).
+- The stateless [`pages/api/callagent.js`](../whatsupp2/pages/api/callagent.js) Chat tab — which has nowhere to persist a session id — either grows ad-hoc per-request session creation (cheap, throwaway) or stays on the existing system-prompt path (`execution.endpoint` empty). Both work.
+- New failure modes: session expiry mid-run, runner restarts, `interview_id` reuse.
+
+Estimated half-day in whatsupp2, not catastrophic — but **a whatsupp2-side decision driven by a whatsupp2-side need.**
+
+### Disposition
+
+- ✅ The runner ships the right endpoints.
+- ❌ The runner does **not** ship a stateless compatibility endpoint.
+- 🔜 The integration lands when whatsupp2 prioritizes session-aware `callAgent`. Tracked there, not blocking here.
+
+When that work starts, the runner side should need zero changes — the `/api/chat/*` endpoints are already what whatsupp2 will call.

@@ -78,11 +78,32 @@ def test_plan_omits_interrupts_when_already_in_one(coffee):
 
 
 def test_plan_in_interrupt_offers_return_to_caller(coffee):
-    """Inside int_menu, the only exit is return_to_caller — it should
-    short-circuit immediately, no LLM call needed for routing."""
+    """Inside int_menu, the only exit is return_to_caller — surface it as an
+    LLM-driven take_exit_path candidate so the LLM picks when to return."""
     plan = routing.plan(coffee, "int_menu", {}, in_interrupt=True)
-    assert plan.shortcut is not None
-    assert plan.shortcut.kind == "return_to_caller"
+    assert plan.shortcut is None
+    assert {ep.id for ep in plan.llm_exit_paths} == {"xp_int_menu_return"}
+
+
+def test_resolve_return_to_caller_via_take_exit_path(coffee):
+    """LLM picks the return path via take_exit_path; resolve builds a
+    return_to_caller Decision (not a take_exit)."""
+    plan = routing.plan(coffee, "int_menu", {}, in_interrupt=True)
+    decision = routing.resolve(
+        plan,
+        coffee,
+        llm_results={"take_exit_path": {"exit_path_id": "xp_int_menu_return"}},
+    )
+    assert decision.kind == "return_to_caller"
+    assert decision.exit_path.id == "xp_int_menu_return"
+
+
+def test_resolve_stays_in_interrupt_when_llm_does_not_call_tool(coffee):
+    """No tool call inside the interrupt → stay (multi-turn side conversation
+    OK; LLM decides when to fire the return)."""
+    plan = routing.plan(coffee, "int_menu", {}, in_interrupt=True)
+    decision = routing.resolve(plan, coffee, llm_results={})
+    assert decision.kind == "stay"
 
 
 def test_resolve_uses_llm_take_exit(coffee):

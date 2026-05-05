@@ -41,11 +41,16 @@ def test_global_interrupt_indexed(coffee_spec):
         assert "int_menu" in {f.id for f in applicable_interrupts(coffee_spec, caller)}
 
 
-def test_return_to_caller_has_no_condition(coffee_spec):
+def test_return_to_caller_carries_condition_expression(coffee_spec):
+    """Spec authors can put a `condition.expression` on a return_to_caller
+    exit to tell the LLM when to return — same idiom as forward exits. The
+    runner surfaces it in the take_exit_path tool description."""
     int_menu = coffee_spec.flows_by_id["int_menu"]
     [exit_path] = int_menu.routing.exit_paths
     assert exit_path.type == "return_to_caller"
-    assert exit_path.condition is None
+    assert exit_path.condition is not None
+    assert exit_path.condition.method == "llm"
+    assert "named a drink" in exit_path.condition.expression
 
 
 def test_greet_routing_methods(coffee_spec):

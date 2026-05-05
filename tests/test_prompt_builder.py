@@ -81,12 +81,51 @@ def test_take_exit_path_enum_includes_only_llm_paths(coffee):
     assert set(enum) == {"xp_co_to_confirm", "xp_co_cancel"}
 
 
-def test_no_tools_inside_interrupt(coffee):
-    """Inside int_menu, the only exit is return_to_caller (unconditional, no
-    LLM work). build_tools should return None."""
+def test_take_exit_tool_inside_interrupt_offers_return(coffee):
+    """Inside int_menu, the only exit is return_to_caller — surfaced as an
+    LLM-driven take_exit_path candidate so the LLM picks when to return."""
     plan = routing.plan(coffee, "int_menu", {}, in_interrupt=True)
     tools = prompt_builder.build_tools(plan)
-    assert tools is None
+    assert tools is not None
+    take_tool = next(t for t in tools.standard_tools if t.name == "take_exit_path")
+    assert take_tool.properties["exit_path_id"]["enum"] == ["xp_int_menu_return"]
+    # int_menu's return path carries a condition.expression — that wins over
+    # the hardcoded default, giving the LLM spec-author-controlled guidance
+    # about WHEN to return rather than vague "naturally complete" prose.
+    desc = take_tool.properties["exit_path_id"]["description"]
+    assert "xp_int_menu_return" in desc
+    assert "named a drink" in desc
+
+
+def test_return_path_without_condition_falls_back_to_default():
+    """When a return_to_caller exit has no condition.expression, the tool
+    description uses the runner's default fallback text — keeps trivial
+    info-lookup interrupts working without per-spec ceremony."""
+    from uxflows_runner.spec.types import (
+        Agent, AgentMeta, Condition, ExitPath, Flow, Routing, Spec,
+    )
+    from uxflows_runner.spec.loader import _index
+
+    interrupt = Flow(
+        id="int_q",
+        type="interrupt",
+        scope=["global"],
+        routing=Routing(
+            entry_condition=Condition(method="llm", expression="patron asks something"),
+            exit_paths=[ExitPath(id="x_back", type="return_to_caller", next_flow_id=None)],
+        ),
+    )
+    main_flow = Flow(id="f", type="happy")
+    spec = Spec(
+        agent=Agent(id="ag", meta=AgentMeta(modes=["voice"]), entry_flow_id="f"),
+        flows=[main_flow, interrupt],
+    )
+    loaded = _index(spec, raw='{}')
+    plan = routing.plan(loaded, "int_q", {}, in_interrupt=True)
+    tools = prompt_builder.build_tools(plan)
+    take_tool = next(t for t in tools.standard_tools if t.name == "take_exit_path")
+    desc = take_tool.properties["exit_path_id"]["description"]
+    assert "Return to the previous flow" in desc
 
 
 def test_per_language_faq_used():

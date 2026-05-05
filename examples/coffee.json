@@ -227,7 +227,7 @@
       "name": "Greet & route",
       "description": "Welcome the patron and figure out whether they're ordering a coffee or a tea. Self-contained: scripts reference no pre-populated variables.",
       "type": "happy",
-      "instructions": "Open warmly. Ask the patron what they'd like today. From their reply, determine drink_type (coffee or tea). If unclear, ask one short clarifying question and try again. Patrons asking for anything off-menu (pastries, food, smoothies): say we don't carry that and offer coffee or tea.",
+      "instructions": "Open warmly. Ask the patron what they'd like today. From their reply, determine drink_type (coffee or tea). Once a category is clear, move on — drink-style (drip / americano / latte) is the next flow's job, not yours. Only ask a clarifier when the reply is genuinely ambiguous (e.g. 'something warm'). Patrons asking for anything off-menu (pastries, food, smoothies): say we don't carry that and offer coffee or tea.",
       "scripts": {
         "en-US": [
           {
@@ -496,7 +496,7 @@
       "scope": [
         "global"
       ],
-      "instructions": "Give a quick rundown: drip, americano, or latte for coffee; black, green, or herbal for tea; all come small, medium, or large. Don't list prices unless asked. Keep it to one sentence.",
+      "instructions": "Give a quick one-sentence rundown of the menu — drip/americano/latte for coffee; black/green/herbal tea; small/medium/large. Don't list prices unless asked.",
       "scripts": {
         "en-US": [
           {
@@ -514,7 +514,11 @@
           {
             "id": "xp_int_menu_return",
             "type": "return_to_caller",
-            "next_flow_id": null
+            "next_flow_id": null,
+            "condition": {
+              "expression": "Patron has heard the menu and either named a drink, asked one quick follow-up, or moved on.",
+              "method": "llm"
+            }
           }
         ]
       }

@@ -150,12 +150,19 @@ async def test_global_interrupt_push_and_return(globally_scoped_spec):
     assert s.state.is_in_interrupt
     assert s.state.active.caller_flow_id == "flow_a"
 
-    # Inside the interrupt: only exit is return_to_caller, plan short-circuits
+    # Inside the interrupt: only exit is return_to_caller, surfaced as an
+    # LLM-driven take_exit_path candidate. LLM picks it when ready to return.
     plan2 = routing.plan(globally_scoped_spec, "int_global", {}, in_interrupt=True)
     s.current_plan = plan2
-    assert plan2.shortcut is not None
-    assert plan2.shortcut.kind == "return_to_caller"
-    await _apply_decision(plan2.shortcut, s)
+    assert plan2.shortcut is None
+    assert {ep.id for ep in plan2.llm_exit_paths} == {"x_back"}
+    decision2 = routing.resolve(
+        plan2,
+        globally_scoped_spec,
+        llm_results={"take_exit_path": {"exit_path_id": "x_back"}},
+    )
+    assert decision2.kind == "return_to_caller"
+    await _apply_decision(decision2, s)
     assert s.state.active_flow_id == "flow_a"
     assert not s.state.is_in_interrupt
 

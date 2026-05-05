@@ -12,9 +12,11 @@ Two phases per turn:
      certainty); among LLM picks, exactly one — `take_exit_path` OR
      `trigger_interrupt` — fires.
 
-`return_to_caller` exits are unconditional: when the active flow is an
-interrupt, its `return_to_caller` exit path is always available and a
-non-LLM-method shortcut can take it without an LLM call.
+`return_to_caller` exits are exposed as LLM-method `take_exit_path`
+candidates — the LLM picks when to return based on conversational signals
+("patron is satisfied", "patron clearly moved on"). Auto-firing every turn
+would pop the interrupt before the patron could ask follow-ups inside it
+(e.g. "what's on the menu?" → "tell me about the latte" → return).
 
 Per RUNNER-PLAN: scope matches against the top-of-stack flow only.
 """
@@ -72,15 +74,12 @@ def plan(
     plan = RoutingPlan(active_flow=active)
 
     for ep in active.routing.exit_paths:
-        # `return_to_caller` is unconditional and only meaningful inside an
-        # interrupt. Honor it as an immediate shortcut when applicable.
+        # `return_to_caller` is only meaningful inside an interrupt. Surface
+        # as an LLM-driven `take_exit_path` candidate — the LLM picks when to
+        # return based on conversational signals.
         if ep.type == "return_to_caller":
-            if in_interrupt and plan.shortcut is None:
-                plan.shortcut = Decision(
-                    kind="return_to_caller",
-                    exit_path=ep,
-                    source_flow=active,
-                )
+            if in_interrupt:
+                plan.llm_exit_paths.append(ep)
             continue
 
         condition = ep.condition
@@ -189,7 +188,13 @@ def force_max_turns_fallback(active_flow: Flow) -> Decision:
 
 
 def _build_take_exit(active_flow: Flow, ep: ExitPath) -> Decision:
-    if ep.next_flow_id is None and ep.type != "return_to_caller":
+    if ep.type == "return_to_caller":
+        return Decision(
+            kind="return_to_caller",
+            exit_path=ep,
+            source_flow=active_flow,
+        )
+    if ep.next_flow_id is None:
         return Decision(kind="end", exit_path=ep, source_flow=active_flow)
     return Decision(
         kind="take_exit",

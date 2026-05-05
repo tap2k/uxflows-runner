@@ -30,7 +30,7 @@ from typing import Any
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 
-from uxflows_runner.spec.types import Agent, Flow
+from uxflows_runner.spec.types import Agent, ExitPath, Flow
 
 from .routing import RoutingPlan
 
@@ -141,6 +141,9 @@ def build_tools(plan: RoutingPlan) -> ToolsSchema | None:
 
 def _take_exit_path_schema(plan: RoutingPlan) -> FunctionSchema:
     exit_ids = [ep.id for ep in plan.llm_exit_paths]
+    descriptions = "\n".join(
+        f"- {ep.id}: {_exit_path_intent(ep)}" for ep in plan.llm_exit_paths
+    )
 
     properties: dict[str, dict] = {
         "exit_path_id": {
@@ -149,7 +152,8 @@ def _take_exit_path_schema(plan: RoutingPlan) -> FunctionSchema:
             "description": (
                 "Pick the exit path that matches the patron's current state. "
                 "Choose only when the conversation has clearly reached one of "
-                "these conditions; otherwise keep talking and don't call this tool."
+                "these conditions; otherwise keep talking and don't call this "
+                "tool.\n\nAvailable exit paths:\n" + descriptions
             ),
         }
     }
@@ -181,6 +185,24 @@ def _take_exit_path_schema(plan: RoutingPlan) -> FunctionSchema:
         properties=properties,
         required=["exit_path_id"],
     )
+
+
+def _exit_path_intent(ep: ExitPath) -> str:
+    """One-line intent text used in the take_exit_path enum description so
+    the LLM can disambiguate between exit_path_id choices.
+
+    `condition.expression` wins when present — same idiom forward exits use,
+    now also available to return paths so spec authors can express "return
+    when X" without writing it as plumbing in flow.instructions.
+    """
+    if ep.condition is not None:
+        return ep.condition.expression
+    if ep.type == "return_to_caller":
+        return (
+            "Return to the previous flow when this side conversation is "
+            "naturally complete and the patron is ready to move on."
+        )
+    return ep.id
 
 
 def _trigger_interrupt_schema(plan: RoutingPlan) -> FunctionSchema:

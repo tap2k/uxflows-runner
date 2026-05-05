@@ -375,3 +375,65 @@ async def test_assistant_message_with_tool_call_appended_to_context(
 
     tool_results = [m for m in msgs if m.get("role") == "tool"]
     assert len(tool_results) == 1
+
+
+@pytest.mark.asyncio
+async def test_interrupt_then_return_via_take_exit_path(coffee_spec, monkeypatch):
+    """Regression: trigger int_menu, take a follow-up turn inside it, then
+    return via take_exit_path picking xp_int_menu_return.
+
+    Pre-fix: return_to_caller exits sat on plan.shortcut and were dropped
+    when the LLM produced text-only — patron stayed in int_menu forever.
+    Post-fix: the return path is an LLM-driven take_exit_path candidate;
+    the LLM picks it when ready.
+    """
+    script = [
+        # Opening
+        ("Welcome! What can I get you?", []),
+        # User asks "what do you have?" → trigger_interrupt fires (text + tool together)
+        (
+            "We've got drip, americano, latte for coffee, plus tea — all sizes.",
+            [_tc("trigger_interrupt", {"interrupt_flow_id": "int_menu"})],
+        ),
+        # Gemini's interrupt-handler quirk: follow-up inference inside int_menu
+        # (apply_tool_call drives this unconditionally for trigger_interrupt).
+        ("What sounds good?", []),
+        # User asks a follow-up inside the interrupt → LLM stays in int_menu.
+        ("Latte's espresso with steamed milk — popular pick. Want one?", []),
+        # User says "I'll have coffee" → LLM fires take_exit_path with the
+        # return path. Both text AND tool call together.
+        (
+            "Coffee it is — coming up.",
+            [_tc("take_exit_path", {"exit_path_id": "xp_int_menu_return"})],
+        ),
+        # Follow-up inference after return-to-caller (apply_tool_call triggers it).
+        ("What size would you like?", []),
+    ]
+    monkeypatch.setattr(TextSession, "_run_inference", _scripted_inference(script))
+
+    ts, _ = await TextSession.start(spec=coffee_spec, api_key="dummy")
+    ts.drain_events()
+
+    # Trigger the interrupt
+    reply = await ts.turn("what do you have?")
+    assert reply == "What sounds good?"
+    assert ts.session.state.active_flow_id == "int_menu"
+    assert ts.session.state.is_in_interrupt
+    ts.drain_events()
+
+    # Multi-turn inside the interrupt — should NOT auto-return on plain text
+    reply = await ts.turn("what's a latte?")
+    assert reply == "Latte's espresso with steamed milk — popular pick. Want one?"
+    assert ts.session.state.active_flow_id == "int_menu"
+    assert ts.session.state.is_in_interrupt
+    ts.drain_events()
+
+    # LLM picks the return path → pop back to flow_greet, follow-up inference fires
+    reply = await ts.turn("I'll have coffee")
+    assert reply == "What size would you like?"
+    assert ts.session.state.active_flow_id == "flow_greet"
+    assert not ts.session.state.is_in_interrupt
+
+    events = ts.drain_events()
+    fes = [e for e in events if isinstance(e, FlowEntered)]
+    assert any(e.flow_id == "flow_greet" and e.via == "return_to_caller" for e in fes)

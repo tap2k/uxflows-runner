@@ -112,7 +112,7 @@ class Action(Strict):
 class ExitPath(Strict):
     id: str
     type: ExitPathType
-    condition: Condition | None = None  # absent on return_to_caller (per coffee.json)
+    condition: Condition | None = None  # optional on return_to_caller — when present, surfaces as the per-exit hint in take_exit_path
     next_flow_id: str | None = None
     assigns: dict[str, Assign] = Field(default_factory=dict)
     actions: list[Action] = Field(default_factory=list)

@@ -28,7 +28,7 @@ Interpret v0 specs live. **Drive voice (Pipecat WebRTC pipeline) or text (HTTP `
 Two consumers by design:
 
 1. **Standalone debug pages** at [web/](./web/) — runner-served debug surfaces (voice via vanilla `RTCPeerConnection` + `getUserMedia`; text via vanilla `fetch()`; bare audio for STT/VAD triage). Self-contained: one process serves the pages and the API endpoints.
-2. **Editor canvas integration** — eventual second consumer of the same event stream; lives in [`../uxflows/`](../uxflows/), not here. Already consumes the text endpoints via [SIMULATE-PLAN.md](../uxflows/SIMULATE-PLAN.md).
+2. **Editor canvas integration** — second consumer of the same event stream; lives in [`../uxflows/`](../uxflows/), not here. Already consumes the text endpoints via [`SimulatePanel.tsx`](../uxflows/components/runtime/SimulatePanel.tsx) + [`lib/store/simulate.ts`](../uxflows/lib/store/simulate.ts) (active flow + edge highlight on the canvas).
 
 The runner has dual identity: prototyping component when invoked from the editor, simulation substrate when invoked by whatsupp2. One executor, two roles.
 
