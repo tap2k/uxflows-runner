@@ -181,6 +181,8 @@ For v0, the runner loads the spec on `POST /run` and treats it as immutable for 
 
 The runner pushes events via SSE; the editor never queries the runner for state. The editor's runtime store is built up from the event stream alone. This keeps the contract one-directional and replayable — record the event log, replay it later, get an identical canvas illumination experience. Bidirectional control (pause, step, inject) is deferred to a future websocket channel.
 
+**Event payloads must carry UX4 stable IDs at every emit site** (`flow_id`, `exit_path_id`, `guardrail_id`, `capability_id`). The same event stream powers the editor canvas today and will power whatsupp2's eval-on-canvas overlay later — guardrail-fail rates and scenario coverage pinned to the same nodes the spec defines. ID stability across the stream is the interop contract; treat event-shape changes as breaking.
+
 ### Dispatcher must stay framework-agnostic
 
 The dispatcher's interface is `dispatch(user_text, flow_state, variables) -> (assistant_text, transitions, events)`. Pipecat-specific code is confined to `dispatcher/processor.py` (the `FrameProcessor` wrapper) and `server/pipeline.py`. The core dispatcher logic in `methods.py`, `expressions.py`, `assigns.py`, `routing.py`, `capabilities.py`, `prompt_builder.py` knows nothing about Pipecat. This is the deliberate hedge: if we ever want to swap to Patter for production telephony, or reuse the dispatcher inside whatsupp2's text simulator, the swap is bounded to the integration glue.
