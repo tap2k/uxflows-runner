@@ -26,6 +26,7 @@ class Config:
     port: int
     spec_path: str
     execution_config_path: str | None
+    event_log_dir: Path | None
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -57,6 +58,9 @@ class Config:
                 f"UXFLOWS_EXECUTION_CONFIG={exec_path!r} does not exist."
             )
 
+        log_dir_env = os.environ.get("UXFLOWS_EVENT_LOG_DIR")
+        event_log_dir = Path(log_dir_env) if log_dir_env else None
+
         return cls(
             google_credentials_path=creds,
             google_project_id=project_id,
@@ -67,4 +71,5 @@ class Config:
             port=int(os.environ.get("UXFLOWS_PORT", "8000")),
             spec_path=spec_path,
             execution_config_path=exec_path,
+            event_log_dir=event_log_dir,
         )

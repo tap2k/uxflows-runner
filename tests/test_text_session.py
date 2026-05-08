@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from uxflows_runner.config import Config
 from uxflows_runner.events.schema import (
     ExitPathTaken,
     FlowEntered,
@@ -375,6 +376,51 @@ async def test_assistant_message_with_tool_call_appended_to_context(
 
     tool_results = [m for m in msgs if m.get("role") == "tool"]
     assert len(tool_results) == 1
+
+
+@pytest.mark.asyncio
+async def test_event_log_dir_writes_session_jsonl(coffee_spec, monkeypatch, tmp_path):
+    """When config.event_log_dir is set, events for a session are appended to
+    {dir}/{session_id}.jsonl. Buffer-side `drain_events()` keeps working."""
+    script = [
+        ("Welcome!", []),
+        (
+            "Coffee, got it.",
+            [_tc("take_exit_path", {"exit_path_id": "xp_greet_to_coffee", "drink_type": "coffee"})],
+        ),
+    ]
+    monkeypatch.setattr(TextSession, "_run_inference", _scripted_inference(script))
+
+    log_dir = tmp_path / "sessions"
+    cfg = Config(
+        google_credentials_path="",
+        google_project_id="",
+        google_location="us-east4",
+        llm_model="gemini-2.5-flash",
+        tts_voice="",
+        host="127.0.0.1",
+        port=8000,
+        spec_path="",
+        execution_config_path=None,
+        event_log_dir=log_dir,
+    )
+
+    ts, _ = await TextSession.start(spec=coffee_spec, api_key="dummy", config=cfg)
+    await ts.turn("a coffee please")
+    await ts.end()
+
+    expected = log_dir / f"{ts.session_id}.jsonl"
+    assert expected.is_file()
+    lines = expected.read_text(encoding="utf-8").splitlines()
+    parsed = [json.loads(line) for line in lines]
+    types = [p["type"] for p in parsed]
+    # Must include the full arc — session_started ... session_ended
+    assert types[0] == "session_started"
+    assert types[-1] == "session_ended"
+    assert "exit_path_taken" in types
+    assert "variable_set" in types
+    # Every record carries the same session_id
+    assert all(p["session_id"] == ts.session_id for p in parsed)
 
 
 @pytest.mark.asyncio

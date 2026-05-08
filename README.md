@@ -10,6 +10,8 @@ Plan and rationale: [RUNNER-PLAN.md](./RUNNER-PLAN.md). Strategy: [../uxflows/ST
 - **Phase 1** ✅ — v0 dispatcher: spec-driven flow interpretation, three-method routing (`direct` / `calculation` / `llm`), interrupts with `return_to_caller`, post-exit assigns + capability dispatch, event emission.
 - **Phase 1.5** ✅ — text I/O adapter: `/api/chat/{session,turn,end}` endpoints, BYOK or env-fallback auth, `context_vars` for placeholder substitution + initial variable seeding.
 - **Phase 2 (text path)** ✅ — editor canvas highlighting from event stream. `FlowNode` rings the active flow; edges pulse on `exit_path_taken`; variables stream into the simulate panel. Wired through HTTP (Phase 1.5's `/api/chat/*`), not SSE. Voice-mode → editor integration (SSE broker, `/api/offer` event subscription) deferred until a voice consumer needs it.
+- **Session event log persistence** ✅ — set `UXFLOWS_EVENT_LOG_DIR` and every session writes a `{session_id}.jsonl` file alongside the live emitter. Per-session file = one file replay. Voice + text both honor it.
+- **Voice-mode parity with text** ✅ — silent-take_exit follow-up (tool-less re-inference when Gemini fires a routing tool with no spoken text) and `context_vars` on `POST /api/offer` (mirrors `/api/chat/session`).
 
 ## Setup
 
@@ -122,5 +124,4 @@ All three stay around as debug surfaces forever. They don't disappear when the e
 ## Known rough edges
 
 - **Walkaway gap** — Gemini sometimes responds to a graceful goodbye with text only, no `take_exit_path`. Session stays "live" until idle GC. Documented in [RUNNER-PLAN §"Live-test follow-up"](./RUNNER-PLAN.md#live-test-follow-up-2026-04-30-evening). Click Reset (or close the tab) to recover.
-- **Silent take_exit (voice mode only)** — fixed in text mode (no-tools follow-up inference). Voice mode TODO; sketch in same section.
 - **Single user, single host** — v0 deployment model. Concurrent sessions across one process should work but are untested at scale.

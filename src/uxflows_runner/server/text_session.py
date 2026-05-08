@@ -42,7 +42,11 @@ from uxflows_runner.dispatcher.processor import (
 )
 from uxflows_runner.dispatcher.prompt_builder import build_system_prompt
 from uxflows_runner.dispatcher.session import Session
-from uxflows_runner.events.emitter import BufferingEventEmitter
+from uxflows_runner.events.emitter import (
+    BufferingEventEmitter,
+    JsonlEventEmitter,
+    MultiEventEmitter,
+)
 from uxflows_runner.events.schema import Event, SessionEnded
 from uxflows_runner.spec.loader import LoadedSpec
 
@@ -122,6 +126,12 @@ class TextSession:
             capabilities=capabilities,
             language=lang,
         )
+        # Tee events to disk if configured. `events` (BufferingEventEmitter)
+        # is kept on `self` for `drain_events()`; the dispatcher reads via
+        # `session.events`, which we wrap with the JSONL sink.
+        if config is not None and config.event_log_dir is not None:
+            jsonl_path = config.event_log_dir / f"{session.session_id}.jsonl"
+            session.events = MultiEventEmitter([events, JsonlEventEmitter(jsonl_path)])
         if context_vars:
             session.state.variables.update(context_vars)
 

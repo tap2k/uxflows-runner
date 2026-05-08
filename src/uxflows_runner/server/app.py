@@ -114,6 +114,11 @@ async def webrtc_offer(request: Request):
     # Strip our extension fields before handing the rest to Pipecat's SDP
     # request parser — it errors on unknown keys.
     raw_spec = body.pop("spec", None)
+    context_vars = body.pop("context_vars", None)
+    if context_vars is not None and not isinstance(context_vars, dict):
+        raise HTTPException(
+            status_code=400, detail="context_vars must be an object"
+        )
     req = SmallWebRTCRequest.from_dict(body)
 
     spec = _resolve_spec(raw_spec)
@@ -127,6 +132,7 @@ async def webrtc_offer(request: Request):
                 app.state.config,
                 spec,
                 execution_config_path=app.state.config.execution_config_path,
+                context_vars=context_vars,
             )
         )
         app.state.tasks.add(task)

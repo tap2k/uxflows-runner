@@ -42,6 +42,7 @@ from pipecat.frames.frames import (
     LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMRunFrame,
+    LLMTextFrame,
 )
 from pipecat.processors.aggregators.llm_context import NOT_GIVEN
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
@@ -76,7 +77,13 @@ from .session import Session
 
 
 class PreLLMPlanner(FrameProcessor):
-    """Per-turn: plan routing + load tools into context."""
+    """Per-turn: plan routing + load tools into context.
+
+    Honors `session.skip_next_planning` for the silent-take_exit follow-up:
+    when set, this pass leaves tools/prompt as-is (the take_exit handler
+    already cleared tools and pushed the new flow's prompt) so the follow-up
+    inference runs text-only and can't chain another routing decision.
+    """
 
     def __init__(self, session: Session) -> None:
         super().__init__()
@@ -87,8 +94,40 @@ class PreLLMPlanner(FrameProcessor):
         if isinstance(frame, LLMContextFrame) and direction == FrameDirection.DOWNSTREAM:
             s = self._session
             if not s.ended and s.state.stack:
-                plan_for_active_flow(s)
+                if s.skip_next_planning:
+                    # Consume the flag — only this single inference is exempt.
+                    s.skip_next_planning = False
+                else:
+                    plan_for_active_flow(s)
                 s.tool_handler_fired_this_turn = False
+                s.text_emitted_this_turn = False
+        await self.push_frame(frame, direction)
+
+
+class TextFrameWatcher(FrameProcessor):
+    """Sits between the LLM service and TTS. Flips
+    `session.text_emitted_this_turn = True` whenever the LLM pushes a
+    non-empty `LLMTextFrame`. Used by the silent-take_exit follow-up to
+    detect responses where the model emitted ONLY a tool call (silent UX).
+
+    Pipecat's LLM service streams text parts via `push_frame()` synchronously
+    during response generation; tool handlers run after streaming ends.
+    By the time the take_exit handler reads this flag, all text frames from
+    THIS response have already propagated past the watcher.
+    """
+
+    def __init__(self, session: Session) -> None:
+        super().__init__()
+        self._session = session
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+        if (
+            isinstance(frame, LLMTextFrame)
+            and direction == FrameDirection.DOWNSTREAM
+            and frame.text
+        ):
+            self._session.text_emitted_this_turn = True
         await self.push_frame(frame, direction)
 
 
@@ -146,7 +185,24 @@ def register_dispatcher_tools(llm: LLMService, session: Session) -> None:
         await params.result_callback(
             {}, properties=FunctionCallResultProperties(run_llm=False)
         )
-        if decision is not None and decision.kind in ("trigger_interrupt", "return_to_caller"):
+        if decision is None:
+            return
+        if decision.kind in ("trigger_interrupt", "return_to_caller"):
+            await params.llm.push_frame(LLMRunFrame())
+            return
+        # Silent-take_exit follow-up: Gemini sometimes emits the tool call
+        # with no text part — state mutates correctly but the user gets dead
+        # air. Push ONE follow-up inference with tools cleared so the model
+        # produces words and can't chain another transition. Mirrors the
+        # text-mode pattern in TextSession._run_one_turn. Skipped on
+        # terminal exits (`end`) — there's no flow left to speak from.
+        if (
+            decision.kind == "take_exit"
+            and not session.text_emitted_this_turn
+            and not session.ended
+        ):
+            session.llm_context.set_tools(NOT_GIVEN)
+            session.skip_next_planning = True
             await params.llm.push_frame(LLMRunFrame())
 
     async def _trigger_interrupt(params: FunctionCallParams) -> None:

@@ -247,7 +247,7 @@ Live testing during Phase 1.5 surfaced a third sibling of this family: **`take_e
 
 **Text mode fix (shipped):** [`TextSession._run_one_turn`](src/uxflows_runner/server/text_session.py) issues a single follow-up inference with **tools dropped** (`include_tools=False`) when `decision.kind == "take_exit"` and the original turn returned no text. Tools-dropped is structurally safe — the model can only produce text, can't chain another transition, can't fire a premature cancel/confirm. Capped at one follow-up per turn. Live test 2026-05-04: previously-empty `agent_text` for "i'd like a latte" now returns "Got it. And what size would you like for that latte?"
 
-**Voice mode TODO:** Same pattern applies in voice — silence after the user says "i'd like a latte" is worse UX than an empty text bubble. The fix is structurally similar: in `_take_exit_path` handler, after `apply_tool_call` returns a take_exit Decision, if no text frame fired this turn, push an `LLMRunFrame()` for the follow-up — but with tools cleared (e.g. `s.llm_context.set_tools(NOT_GIVEN)` before the frame, then re-plan after). Needs a small `LLMTextFrame` listener to set a `text_emitted_this_turn` flag on Session. Estimated ~15 LOC. Worth doing once text mode has been used enough to validate the no-tools-followup pattern doesn't surprise.
+**Voice mode fix (shipped 2026-05-08):** [`TextFrameWatcher`](src/uxflows_runner/dispatcher/processor.py) processor between `llm` and `tts` flips `session.text_emitted_this_turn` on `LLMTextFrame`. `_take_exit_path` handler reads the flag after `apply_tool_call`; on silent take_exit (not end), it clears tools, sets `skip_next_planning=True`, and pushes `LLMRunFrame()`. PreLLMPlanner honors the skip flag for one pass so the follow-up runs tool-less. Text and voice now share the same Gemini-silent-routing backstop.
 
 **Known walkaway gap (not yet fixed):** distinct from silent take_exit — here Gemini emits NEITHER a text-only goodbye NOR a `take_exit_path` call. Live test 2026-04-30: user said "Maybe I'll come back another time" → agent replied "No problem, I hope to see you back soon!" but did NOT fire `take_exit_path(xp_greet_walkaway)`. The conversation stayed in `flow_greet` and the `cap_log_walkaway` action never fired. The model treats "graceful goodbye" as a complete textual response, not a routing event.
 
@@ -257,6 +257,8 @@ This is harder to backstop than silent-take_exit because by the time we'd notice
 - **Wait for non-Gemini LLM** — Claude / GPT-5 are likely to handle this naturally given their better text+tool discipline.
 
 Logged as a v0 rough edge. Not a blocker for the visual demo (the canvas still highlights flow_greet, accurately reflecting state) but is a blocker for any production use where post-walkaway logging matters.
+
+**Common thread.** All three quirks above (silent `trigger_interrupt`, silent `take_exit_path`, walkaway gap) are flavors of the same Gemini instinct: the model treats certain replies as "the answer," not "the answer plus a routing event." Each has its own backstop today — `LLMRunFrame` follow-up on interrupts, no-tools follow-up on take_exit (text mode only so far), prompt-only on walkaway. The cleaner long-term fix is an LLM swap: Claude and GPT-5 bundle text + tool calls more reliably, and dropping each workaround is a one-line `if` flip per handler. None of these are dispatcher bugs — the cognitive layer is the variance source, not the framework-agnostic core.
 
 ### Schema coverage
 
@@ -513,12 +515,10 @@ Brought forward from "Out of scope for v0" because the editor needed a text-chat
 
 **Context vars (added 2026-05-04):** `/api/chat/session` accepts an optional `context_vars: dict[str, Any]`. At session start, the runner merges these into the dispatcher's variable bag (read by `calculation`-method conditions, capability inputs, etc.) AND uses them to substitute `{KEY}` placeholders in the composed system prompt via a new [`prompt_builder.substitute_variables`](src/uxflows_runner/dispatcher/prompt_builder.py) helper. Case-insensitive; **unfilled placeholders stay as `{KEY}` literal** (matches whatsupp2's `resolvePromptVariables` semantics — loud is better than silent for designer debugging). Substitution happens as a final pass over the composed prompt so all sections (system_prompt, instructions, scripts, FAQ, glossary) get covered uniformly. Re-runs on every turn via `plan_for_active_flow`, so values that mutate via assigns stay current in the prompt. **Does NOT emit `variable_set` events** for seeded vars — those are reserved for exit-path-fired assigns.
 
-**Voice-mode parity TODOs.** Phase 1.5 added two text-only behaviors that voice would benefit from but doesn't yet have. Both are bounded, well-understood, and waiting on a consumer (telephony deployment, "voice simulate" button in the editor, or the right customer demo) before being prioritized:
+**Voice-mode parity** ✅ shipped 2026-05-08. The two Phase-1.5 text-only behaviors now have voice equivalents:
 
-- **Silent-take_exit follow-up.** Same Gemini quirk hits voice too — sometimes louder, since silence on a phone is worse UX than an empty bubble in text. Fix is structurally similar: in `_take_exit_path` handler, after `apply_tool_call` returns a `take_exit` Decision, if no text frame fired this turn, push an `LLMRunFrame()` for the follow-up — but with tools cleared (e.g. `s.llm_context.set_tools(NOT_GIVEN)` before the frame, then re-plan after). Needs a small `LLMTextFrame` listener to set a `text_emitted_this_turn` flag on Session. Estimated ~15 LOC. Sketch in [§"Live-test follow-up"](#live-test-follow-up-2026-04-30-evening).
-- **`context_vars` on `/api/offer`.** `pipeline.py` currently constructs the initial prompt with `variables=None`; PreLLMPlanner re-syncs from `s.state.variables` on every turn, so seeding the bag would Just Work as long as there's an API surface to pass values in. When wiring telephony or a "voice simulate" UI, add `context_vars` to the `/api/offer` body extension fields (alongside `spec`), and in `run_session` apply them after `Session.start` mirroring [`text_session.py`](src/uxflows_runner/server/text_session.py)'s pattern. ~10 LOC. The natural shape for telephony might be different (look up account from caller ID at connect time rather than POST-body inject), so the editor-shaped HTTP-body API may not be the only design — wait for the consumer to clarify.
-
-Both gaps are intentional asymmetry, not oversight: text was driven by the editor's needs; voice has no equivalent consumer yet, and building speculatively risks designing the wrong shape. Documented here so the next contributor working on voice has the implementation path ready.
+- **Silent-take_exit follow-up.** [`TextFrameWatcher`](src/uxflows_runner/dispatcher/processor.py) sits between `llm` and `tts`, flipping `session.text_emitted_this_turn = True` on any `LLMTextFrame`. The `_take_exit_path` handler reads the flag after `apply_tool_call`: on a `take_exit` decision with no text fired and not ended, it sets `llm_context.set_tools(NOT_GIVEN)`, sets `session.skip_next_planning = True`, and pushes an `LLMRunFrame()`. PreLLMPlanner consumes the skip flag on the next pass so the follow-up runs text-only. Mirrors text mode's `_run_inference(include_tools=False)` shape; reuses the same Pipecat seam.
+- **`context_vars` on `/api/offer`.** Body extension field alongside `spec`. `run_session` seeds the variable bag after `Session.start` and rebuilds the initial system prompt with `variables=` so `{KEY}` placeholders substitute. Same semantics as `/api/chat/session` (no `variable_set` events emitted for seeded vars). Justification isn't voice-mode-parity-for-its-own-sake; it's that eval/sim — the structurally-most-likely next consumer of either endpoint, per [§"Future: whatsupp2 integration"](#future-whatsupp2-integration) — needs to seed scenario context (account state, persona attributes, mocked customer values) regardless of which I/O mode the simulated session runs in. Uniform field across both endpoints is the right shape for that. Telephony's caller-ID-driven shape can layer on top — it'd just call `run_session` with different inputs.
 
 **Known limitations (text + voice both):**
 - Walkaway gap (Phase 1's existing rough edge) applies to text mode too — Gemini sometimes responds to a graceful-goodbye user turn with text only, no `take_exit_path`, leaving the session "live" until idle GC. Same as voice; not text-specific. (Distinct from the silent-take_exit case above: walkaway = no tool call at all; silent-take_exit = tool call but no text.)
@@ -582,8 +582,8 @@ The visual payoff phase. By now the runner emits a clean event stream that the s
 
 **v0.5 — immediately after v0 ships:**
 - **~~Text chat testing UI~~** — landed early as Phase 1.5 above.
-- **Runtime guardrail enforcement.** Currently spec-level metadata only. Adding a post-LLM filter that flags or blocks responses violating guardrails is the runtime evidence behind the "decomposition + auditability" pitch.
-- **Session event log persistence.** Append the event stream to JSONL on disk. Cheap; unlocks replay and offline analysis at near-zero cost. (The replay UI itself is editor-side and follows when there's demand.)
+- **Runtime guardrail enforcement.** Currently spec-level metadata only. Adding a post-LLM filter that flags or blocks responses violating guardrails is the runtime evidence behind the "decomposition + auditability" pitch. Tradeoff: every honest implementation costs latency — the post-LLM classifier adds an inference per turn (or, for voice, parallel-with-TTS classification with audio yank-on-violation). Recommended path: ship in text mode first (no TTFT pressure), validate catch rate, then port to voice with the parallel-TTS pattern.
+- **~~Session event log persistence~~** ✅ shipped 2026-05-08. `UXFLOWS_EVENT_LOG_DIR` env var; per-session `{session_id}.jsonl` file via `JsonlEventEmitter` teed alongside the live emitter through `MultiEventEmitter`. Voice + text both honor it. File closed on `session_ended`. No redaction yet (single-user dev; add before any telephony deployment per [§"Open questions"](#open-questions)).
 
 **Post-v0:**
 - **Local-only vs. tunneled.** v0 is `localhost`-only. No Cloudflare/ngrok tunnel. Demo target is the laptop running both editor and runner. This collapses one whole class of network/permissions issues; revisit if a buyer demo across networks emerges.
@@ -639,3 +639,33 @@ Estimated half-day in whatsupp2, not catastrophic — but **a whatsupp2-side dec
 - 🔜 The integration lands when whatsupp2 prioritizes session-aware `callAgent`. Tracked there, not blocking here.
 
 When that work starts, the runner side should need zero changes — the `/api/chat/*` endpoints are already what whatsupp2 will call.
+
+## Future: SimulatePanel voice mode
+
+**No consumer yet — not building.** The editor's [SimulatePanel](../uxflows/components/runtime/SimulatePanel.tsx) consumes text-mode sessions today via `/api/chat/*`. Adding voice (browser-mic + canvas highlighting + audio playback) is the demo the runner was originally pitched for, but waits for a near-term consumer (buyer pitch, customer ask, internal show). Documented here (2026-05-08) so the design choices already reasoned through don't get re-litigated when the consumer arrives.
+
+### Decisions already made
+
+- **Auth: env-creds-only.** Voice mode requires the runner host to have `data/credentials.json` (Vertex service account for STT/LLM/TTS). No editor-side BYOK STT/TTS keys — adds two credential surfaces with no demand. If a deployment can't mount the JSON, voice mode is disabled.
+- **Event delivery: SSE broker, not data channel or polling.** `GET /api/events?session_id=...` returns `text/event-stream`. WebRTC data channel was rejected (couples events to audio session lifecycle, harder to subscribe-after-start, reinvents SSE). Polling was rejected (visible jitter in canvas highlighting).
+- **Session correlation: client-generated `session_id` in `/api/offer` body.** Avoids reshaping Pipecat's SDP-answer response to inject a server-generated id. Editor uses `crypto.randomUUID()`. The `session_id` flows: client → `/api/offer` body → `run_session` → `Session.start(session_id=...)` → fan-out emitter publishes against it.
+- **Transcript: emit `turn_completed` events from STT and LLM.** Schema already has the type ([events/schema.py](src/uxflows_runner/events/schema.py)); voice path needs to actually emit them. Editor reduces them into the same transcript bubbles text mode shows. Without this, voice mode would have no visible transcript.
+- **UI shape: mode toggle in existing SimulatePanel, not a separate panel.** Variables panel, canvas highlighting, events list, transcript bubbles all reuse from the text path via the existing simulate store. Only chat-input vs mic-button differs.
+
+### Decisions explicitly NOT made (wait for consumer)
+
+- **Reconnect on dropped SSE.** Sketch in original Phase 2 plan; left for when reliability matters.
+- **Multi-subscriber per session.** Replay-buffer-on-subscribe shape only matters when the editor and a second tool (replay viewer, observability) want the same stream. SSE broker should be built with this in mind even if v1 has one subscriber.
+- **End-of-session UX.** Voice's natural end is WebRTC disconnect; editor's "Reset" should call a runner endpoint (or just disconnect the RTC). Pick when implementing.
+
+### Scope when it's built
+
+- ~460 LOC runner-side: `SSEBroker`, `GET /api/events`, `session_id` threading, `turn_completed` emission via a small frame listener (STT `TranscriptionFrame` + LLM accumulated text), tests.
+- ~430 LOC editor-side: `lib/runtime/voiceClient.ts` (port [client.js](web/client.js)), `lib/runtime/sseClient.ts`, simulate store voice extensions, SimulatePanel mode toggle.
+- ~half a day of focused work.
+
+### What changes the answer
+
+- A scheduled voice demo (buyer pitch, customer ask).
+- Telephony deployment landing — but that's a different shape (Patter, caller-ID auth) and probably doesn't need editor-embedded voice.
+- The cheap escape hatch ("voice debug page" link in SimulatePanel) gets used enough that adding canvas highlighting becomes obvious value.

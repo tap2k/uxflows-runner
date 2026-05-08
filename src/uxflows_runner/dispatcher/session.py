@@ -36,6 +36,8 @@ class Session:
     session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     current_plan: "RoutingPlan | None" = None
     tool_handler_fired_this_turn: bool = False
+    text_emitted_this_turn: bool = False
+    skip_next_planning: bool = False
     ended: bool = False
 
     @classmethod

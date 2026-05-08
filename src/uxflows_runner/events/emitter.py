@@ -9,7 +9,8 @@ The dispatcher only ever calls `emit(event)` — no awareness of who's listening
 from __future__ import annotations
 
 import asyncio
-from typing import Protocol
+from pathlib import Path
+from typing import IO, Protocol
 
 from loguru import logger
 
@@ -67,3 +68,67 @@ class BufferingEventEmitter:
     def drain(self) -> list[Event]:
         out, self._buffer = self._buffer, []
         return out
+
+
+class JsonlEventEmitter:
+    """v0.5 — appends events to a JSONL file, one record per line.
+
+    File is opened lazily on the first `emit()` and closed on the first
+    `session_ended` event (which is always the last event in a session).
+    Synchronous append; events are small + low rate, so the cost is
+    negligible vs. queuing/aiofiles.
+
+    Caller owns directory creation only via the path's parent. Bad-path
+    failures (permission, disk full) are logged and the emitter degrades
+    to a no-op — never raises into the dispatcher.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._fh: IO[str] | None = None
+        self._broken = False
+
+    def emit(self, event: Event) -> None:
+        if self._broken:
+            return
+        try:
+            if self._fh is None:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                self._fh = self.path.open("a", encoding="utf-8")
+            self._fh.write(event.model_dump_json() + "\n")
+            self._fh.flush()
+        except OSError as exc:
+            logger.warning("JsonlEventEmitter disabled for {}: {}", self.path, exc)
+            self._broken = True
+            self._safe_close()
+            return
+
+        if event.type == "session_ended":
+            self._safe_close()
+
+    def _safe_close(self) -> None:
+        if self._fh is not None:
+            try:
+                self._fh.close()
+            except OSError:
+                pass
+            self._fh = None
+
+
+class MultiEventEmitter:
+    """Fan-out wrapper: forwards each `emit()` to a list of child emitters.
+
+    Used to tee events to multiple sinks (e.g. Logging + Jsonl, or
+    Buffering + Jsonl). Children are invoked in order; one child raising
+    does not prevent the others from receiving the event.
+    """
+
+    def __init__(self, emitters: list[EventEmitter]) -> None:
+        self.emitters = emitters
+
+    def emit(self, event: Event) -> None:
+        for em in self.emitters:
+            try:
+                em.emit(event)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("emitter {} failed: {}", type(em).__name__, exc)

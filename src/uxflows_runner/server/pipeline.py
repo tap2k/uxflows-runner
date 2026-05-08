@@ -29,12 +29,17 @@ from uxflows_runner.dispatcher.capabilities import CapabilityDispatcher, load_ex
 from uxflows_runner.dispatcher.processor import (
     PostLLMResolver,
     PreLLMPlanner,
+    TextFrameWatcher,
     add_capability_result_listener,
     register_dispatcher_tools,
 )
 from uxflows_runner.dispatcher.prompt_builder import build_system_prompt
 from uxflows_runner.dispatcher.session import Session
-from uxflows_runner.events.emitter import LoggingEventEmitter
+from uxflows_runner.events.emitter import (
+    JsonlEventEmitter,
+    LoggingEventEmitter,
+    MultiEventEmitter,
+)
 from uxflows_runner.spec.loader import LoadedSpec
 
 
@@ -43,8 +48,16 @@ async def run_session(
     config: Config,
     spec: LoadedSpec,
     execution_config_path: str | None = None,
+    context_vars: dict | None = None,
 ) -> None:
-    """Run a single voice session bound to one WebRTC peer connection."""
+    """Run a single voice session bound to one WebRTC peer connection.
+
+    `context_vars` seeds the dispatcher's variable bag at session start —
+    used both for `{KEY}` placeholder substitution in the composed system
+    prompt and as initial values readable by routing conditions / capability
+    inputs. Mirrors text mode (server/text_session.py). Not emitted as
+    `variable_set` events (those are reserved for exit-path-fired assigns).
+    """
     transport = SmallWebRTCTransport(
         webrtc_connection=connection,
         params=TransportParams(
@@ -66,12 +79,12 @@ async def run_session(
         settings=GoogleVertexLLMService.Settings(model=config.llm_model),
     )
 
-    # Compose the entry flow's prompt up front; PreLLMPlanner re-syncs each
-    # turn so this is just a sane starting state.
     entry_flow = spec.entry_flow
     lang = spec.agent.meta.languages[0] if spec.agent.meta.languages else "en-US"
-    initial_prompt = build_system_prompt(spec.agent, entry_flow, lang)
-    context = LLMContext(messages=[{"role": "system", "content": initial_prompt}])
+    # Build the context with a placeholder system message; we'll fill it in
+    # below once context_vars (if any) have been seeded into the variable
+    # bag, so {KEY} substitution sees them.
+    context = LLMContext(messages=[{"role": "system", "content": ""}])
     context_aggregator = LLMContextAggregatorPair(context)
 
     # Capability dispatch — sibling execution.json keyed by capability name.
@@ -88,11 +101,23 @@ async def run_session(
         capabilities=capabilities,
         language=lang,
     )
+    if config.event_log_dir is not None:
+        jsonl_path = config.event_log_dir / f"{session.session_id}.jsonl"
+        session.events = MultiEventEmitter([events, JsonlEventEmitter(jsonl_path)])
+    if context_vars:
+        session.state.variables.update(context_vars)
+
+    initial_prompt = build_system_prompt(
+        spec.agent, entry_flow, lang, variables=session.state.variables
+    )
+    context.messages[0]["content"] = initial_prompt
+
     add_capability_result_listener(session)
 
     register_dispatcher_tools(llm, session)
 
     pre = PreLLMPlanner(session)
+    text_watch = TextFrameWatcher(session)
     post = PostLLMResolver(session)
 
     pipeline = Pipeline(
@@ -102,6 +127,7 @@ async def run_session(
             context_aggregator.user(),
             pre,
             llm,
+            text_watch,
             tts,
             transport.output(),
             post,
