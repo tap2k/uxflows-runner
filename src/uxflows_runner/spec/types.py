@@ -34,6 +34,13 @@ class Guardrail(Strict):
     statement: str
 
 
+class BusinessGoal(Strict):
+    id: str
+    name: str
+    expression: str
+    method: Method
+
+
 class Capability(Strict):
     id: str
     name: str
@@ -156,6 +163,7 @@ class Agent(Strict):
     system_prompt: str | None = None
     chatbot_initiates: bool = False
     guardrails: list[Guardrail] = Field(default_factory=list)
+    business_goals: list[BusinessGoal] = Field(default_factory=list)
     capabilities: list[Capability] = Field(default_factory=list)
     knowledge: AgentKnowledge = Field(default_factory=AgentKnowledge)
     variables: dict[str, VariableDecl] = Field(default_factory=dict)
