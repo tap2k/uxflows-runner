@@ -30,12 +30,17 @@ from typing import Any
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 
-from uxflows_runner.spec.types import Agent, ExitPath, Flow
+from uxflows_runner.spec.types import Agent, ExitPath, Flow, Guardrail
 
 from .routing import RoutingPlan
 
 
 _PLACEHOLDER = re.compile(r"\{(\w+)\}")
+
+
+def _format_guardrail(g: Guardrail) -> str:
+    prefix = "Prefer: " if g.modality == "should" else ""
+    return f"- {prefix}{g.statement}"
 
 
 def substitute_variables(text: str, variables: dict[str, Any] | None) -> str:
@@ -74,7 +79,7 @@ def build_system_prompt(
     if agent.guardrails:
         sections.append(
             "Operating principles:\n"
-            + "\n".join(f"- {g.statement}" for g in agent.guardrails)
+            + "\n".join(_format_guardrail(g) for g in agent.guardrails)
         )
 
     if agent.knowledge.faq:
@@ -93,7 +98,7 @@ def build_system_prompt(
     if flow.guardrails:
         sections.append(
             "For this flow specifically:\n"
-            + "\n".join(f"- {g.statement}" for g in flow.guardrails)
+            + "\n".join(_format_guardrail(g) for g in flow.guardrails)
         )
 
     if flow.knowledge and flow.knowledge.faq:

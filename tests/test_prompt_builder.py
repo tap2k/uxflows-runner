@@ -28,6 +28,9 @@ def test_system_prompt_contains_agent_and_flow_pieces(coffee):
     # Agent guardrails
     assert "Operating principles:" in prompt
     assert "Patrons want their coffee" in prompt
+    # Should-modality guardrails are prefixed; must-modality are bare.
+    assert "- Prefer: Keep replies to one or two sentences" in prompt
+    assert "- Never invent menu items" in prompt
     # FAQ
     assert "Frequently asked:" in prompt
     assert "Do you have decaf?" in prompt
