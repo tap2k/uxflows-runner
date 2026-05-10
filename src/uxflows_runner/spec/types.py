@@ -16,7 +16,6 @@ FlowType = Literal["happy", "sad", "off", "utility", "interrupt"]
 ExitPathType = Literal["happy", "sad", "off", "exit", "return_to_caller"]
 CapabilityKind = Literal["retrieval", "function"]
 VarType = Literal["string", "number", "boolean", "enum"]
-GuardrailModality = Literal["must", "should"]
 
 
 class Strict(BaseModel):
@@ -33,7 +32,6 @@ class Lenient(BaseModel):
 class Guardrail(Strict):
     id: str
     statement: str
-    modality: GuardrailModality | None = None
 
 
 class BusinessGoal(Strict):
