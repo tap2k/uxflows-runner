@@ -194,6 +194,64 @@ def test_substitute_variables_handles_none_and_empty_inputs():
     assert substitute_variables("", {"name": "x"}) == ""
 
 
+# --------------------------------------------------------------------------
+# Variable substitution in rendered condition expressions
+# --------------------------------------------------------------------------
+
+
+def test_take_exit_description_substitutes_session_variables():
+    """Session variables substitute inside condition expressions when rendered
+    into tool descriptions — same {placeholder} mechanism that runs over
+    scripts and instructions. Lets a spec author write a date/amount-aware
+    routing gate like 'on or before {extended_loan_due_date}' and have the
+    LLM see the resolved value at decision time."""
+    from uxflows_runner.spec.loader import _index
+    from uxflows_runner.spec.types import (
+        Agent,
+        AgentMeta,
+        Condition,
+        ExitPath,
+        Flow,
+        Routing,
+        Spec,
+    )
+
+    main_flow = Flow(
+        id="f",
+        type="happy",
+        routing=Routing(
+            exit_paths=[
+                ExitPath(
+                    id="xp_in_grace",
+                    type="happy",
+                    condition=Condition(
+                        method="llm",
+                        expression="customer's date is on or before {extended_loan_due_date}",
+                    ),
+                    next_flow_id=None,
+                )
+            ],
+        ),
+    )
+    spec = _index(
+        Spec(
+            agent=Agent(
+                id="ag", meta=AgentMeta(modes=["voice"]), entry_flow_id="f"
+            ),
+            flows=[main_flow],
+        ),
+        raw="{}",
+    )
+    plan = routing.plan(spec, "f", {}, in_interrupt=False)
+    tools = prompt_builder.build_tools(
+        plan, {"extended_loan_due_date": "2026-06-12"}
+    )
+    take_tool = next(t for t in tools.standard_tools if t.name == "take_exit_path")
+    desc = take_tool.properties["exit_path_id"]["description"]
+    assert "on or before 2026-06-12" in desc
+    assert "{extended_loan_due_date}" not in desc
+
+
 def test_build_system_prompt_substitutes_across_multiple_sections(coffee):
     """Variables seeded into the variable bag get substituted in agent.system_prompt
     AND flow.scripts AND any other composed section. Verifies the substitution

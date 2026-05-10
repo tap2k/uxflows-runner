@@ -121,28 +121,42 @@ def build_system_prompt(
     return substitute_variables("\n\n".join(sections), variables)
 
 
-def build_tools(plan: RoutingPlan) -> ToolsSchema | None:
+def build_tools(
+    plan: RoutingPlan,
+    variables: dict[str, Any] | None = None,
+) -> ToolsSchema | None:
     """Return the per-turn tool schema, or None when there's no LLM routing
     work to do this turn (the caller can skip `tools` entirely on the LLM
     call to save tokens). When None, the LLM still produces text — it just
-    has no routing decisions to emit."""
+    has no routing decisions to emit.
+
+    `variables` are substituted into `{key}` placeholders inside each rendered
+    condition expression before it's inlined into a tool description — so a
+    spec author can write a routing gate like
+      "customer's committed date is on or before {extended_loan_due_date}"
+    and the LLM sees the resolved value at decision time.
+    """
     declarations: list[FunctionSchema] = []
 
     if plan.llm_exit_paths:
-        declarations.append(_take_exit_path_schema(plan))
+        declarations.append(_take_exit_path_schema(plan, variables))
 
     if plan.llm_interrupts:
-        declarations.append(_trigger_interrupt_schema(plan))
+        declarations.append(_trigger_interrupt_schema(plan, variables))
 
     if not declarations:
         return None
     return ToolsSchema(standard_tools=declarations)
 
 
-def _take_exit_path_schema(plan: RoutingPlan) -> FunctionSchema:
+def _take_exit_path_schema(
+    plan: RoutingPlan,
+    variables: dict[str, Any] | None,
+) -> FunctionSchema:
     exit_ids = [ep.id for ep in plan.llm_exit_paths]
     descriptions = "\n".join(
-        f"- {ep.id}: {_exit_path_intent(ep)}" for ep in plan.llm_exit_paths
+        f"- {ep.id}: {substitute_variables(_exit_path_intent(ep), variables)}"
+        for ep in plan.llm_exit_paths
     )
 
     properties: dict[str, dict] = {
@@ -205,10 +219,22 @@ def _exit_path_intent(ep: ExitPath) -> str:
     return ep.id
 
 
-def _trigger_interrupt_schema(plan: RoutingPlan) -> FunctionSchema:
+def _interrupt_intent(f: Flow) -> str:
+    """One-line intent text for an interrupt's trigger_interrupt entry, with
+    the same precedence as exits: entry_condition.expression wins; fall back
+    to flow.description, then flow.id."""
+    if f.routing.entry_condition is not None:
+        return f.routing.entry_condition.expression
+    return f.description or f.id
+
+
+def _trigger_interrupt_schema(
+    plan: RoutingPlan,
+    variables: dict[str, Any] | None,
+) -> FunctionSchema:
     interrupt_ids = [f.id for f in plan.llm_interrupts]
     descriptions = "\n".join(
-        f"- {f.id}: {(f.routing.entry_condition.expression if f.routing.entry_condition else f.description) or f.id}"
+        f"- {f.id}: {substitute_variables(_interrupt_intent(f), variables)}"
         for f in plan.llm_interrupts
     )
     return FunctionSchema(

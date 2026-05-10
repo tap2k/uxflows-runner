@@ -145,7 +145,7 @@ def plan_for_active_flow(s: Session) -> None:
         in_interrupt=s.state.is_in_interrupt,
     )
     s.current_plan = plan
-    tools = build_tools(plan)
+    tools = build_tools(plan, s.state.variables)
     # LLMContext requires ToolsSchema or NOT_GIVEN — never None.
     s.llm_context.set_tools(tools if tools is not None else NOT_GIVEN)
     active = s.spec.flows_by_id[s.state.active_flow_id]
