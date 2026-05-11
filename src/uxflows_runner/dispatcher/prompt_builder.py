@@ -101,9 +101,15 @@ def build_system_prompt(
 
     scripts = flow.scripts.get(lang) or []
     if scripts:
+        lines: list[str] = []
+        for s in scripts:
+            lines.append(f"- {s.text}")
+            for v in s.variations:
+                if v:
+                    lines.append(f"  | {v}")
         sections.append(
             f"Sample lines you might use ({lang}) — paraphrase, don't recite verbatim:\n"
-            + "\n".join(f"- {s.text}" for s in scripts)
+            + "\n".join(lines)
         )
 
     # Two short tool-use reminders. Both compensate for Gemini behaviors we

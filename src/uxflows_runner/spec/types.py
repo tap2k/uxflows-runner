@@ -134,6 +134,7 @@ class Routing(Strict):
 class Script(Strict):
     id: str
     text: str
+    variations: list[str] = Field(default_factory=list)
 
 
 class Flow(Strict):
