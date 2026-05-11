@@ -2,7 +2,7 @@
 
 Voice/text runner for [UX4 v0 specs](../uxflows/SCHEMA.md). Pipecat-based dispatcher with self-contained browser test pages for both modes.
 
-Plan and rationale: [RUNNER-PLAN.md](./RUNNER-PLAN.md). Strategy: [../uxflows/STRATEGY.md](../uxflows/STRATEGY.md). Editor integration is wired through the `/api/chat/*` endpoints below.
+Plan and rationale: [RUNNER-PLAN.md](./RUNNER-PLAN.md). Strategy: [../whatsupp2/STRATEGY.md](../whatsupp2/STRATEGY.md). Editor integration is wired through the `/api/chat/*` endpoints below.
 
 ## Status
 

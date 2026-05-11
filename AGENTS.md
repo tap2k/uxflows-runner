@@ -7,7 +7,7 @@ Do not write to the agent memory system for this project. If prior memories exis
 
 # uxflows-runner
 
-Python runner for [UX4 v0 specs](../uxflows/SCHEMA.md). Interprets a v0 JSON spec live, drives a real-time voice or text conversation, and emits a UX4-id-keyed event stream that downstream consumers (the editor's canvas, eventually whatsupp2's simulator) read.
+Python runner for [UX4 v0 specs](../uxflows/SCHEMA.md). Interprets a v0 JSON spec live, drives a real-time voice or text conversation, and emits a UX4-id-keyed event stream that the editor's canvas reads for live highlighting.
 
 ## Product Context
 
@@ -15,7 +15,7 @@ uxflows-runner is one of three sibling repos that compose UX4. Read these before
 
 - [`../uxflows/AGENTS.md`](../uxflows/AGENTS.md) — editor architecture, mission, schema rationale.
 - [`../uxflows/SCHEMA.md`](../uxflows/SCHEMA.md) — v0 + v1 spec schema (the contract).
-- [`../uxflows/STRATEGY.md`](../uxflows/STRATEGY.md) — cross-repo product strategy and roadmap.
+- [`../whatsupp2/STRATEGY.md`](../whatsupp2/STRATEGY.md) — cross-repo product strategy and roadmap.
 - [`../whatsupp2/AGENT-TESTING.md`](../whatsupp2/AGENT-TESTING.md) — simulation/evaluation product design.
 - [RUNNER-PLAN.md](./RUNNER-PLAN.md) — operational plan for this runner: phases, decisions, risks, open questions.
 
@@ -30,7 +30,7 @@ Two consumers by design:
 1. **Standalone debug pages** at [web/](./web/) — runner-served debug surfaces (voice via vanilla `RTCPeerConnection` + `getUserMedia`; text via vanilla `fetch()`; bare audio for STT/VAD triage). Self-contained: one process serves the pages and the API endpoints.
 2. **Editor canvas integration** — second consumer of the same event stream; lives in [`../uxflows/`](../uxflows/), not here. Already consumes the text endpoints via [`SimulatePanel.tsx`](../uxflows/components/runtime/SimulatePanel.tsx) + [`lib/store/simulate.ts`](../uxflows/lib/store/simulate.ts) (active flow + edge highlight on the canvas).
 
-The runner has dual identity: prototyping component when invoked from the editor, simulation substrate when invoked by whatsupp2. One executor, two roles.
+The runner's role is prototyping infrastructure for uxflows — designer hits Run, talks to the agent, the editor canvas highlights live. Whatsupp2 wraps endpoints directly and does not depend on the runner.
 
 ## Tech Stack
 

@@ -2,17 +2,17 @@
 
 Operational plan for the v0 voice runner — a local Python process that interprets a uxflows v0 spec, drives a real-time voice conversation in the browser, and streams UX4-id-keyed events back to the canvas for live highlighting.
 
-Schema contract in [SCHEMA.md](../uxflows/SCHEMA.md). Codegen reference in [TRANSLATIONS.md](../uxflows/TRANSLATIONS.md). Overall strategy in [STRATEGY.md](../uxflows/STRATEGY.md).
+Schema contract in [SCHEMA.md](../uxflows/SCHEMA.md). Codegen reference in [TRANSLATIONS.md](../uxflows/TRANSLATIONS.md). Overall strategy in [STRATEGY.md](../whatsupp2/STRATEGY.md).
 
 ## Why a runner at all
 
 Three options were on the table for connecting the spec to a runtime:
 
 1. **Codegen for each target** (Pipecat, LiveKit, LangGraph, OpenAI Agents SDK) — generate framework-native code. 4× maintenance; schema features that don't survive every target get dropped at the boundary; sim/prod drift becomes structural.
-2. **Native runner** — interpret the spec directly. Stable IDs, multilingual scripts, eval metadata, guardrails flow through to runtime without round-tripping. One executor for prototyping and simulation. Schema evolution costs scale linearly, not by target count.
+2. **Native runner** — interpret the spec directly. Stable IDs, multilingual scripts, eval metadata, guardrails flow through to runtime without round-tripping. One executor for uxflows prototyping. Schema evolution costs scale linearly, not by target count.
 3. **Hybrid** — own the runner; ship codegen as demand-driven delivery formats later.
 
-Choosing option 3 with **runner-first as canonical**. Codegen deferred until paid for. Rationale lives in [STRATEGY.md](../uxflows/STRATEGY.md) (decomposition as substrate, spec-as-contract, leverage-maximizing split).
+Choosing option 3 with **runner-first as canonical**. Codegen deferred until paid for. Rationale lives in [STRATEGY.md](../whatsupp2/STRATEGY.md) (decomposition as substrate, spec-as-contract, leverage-maximizing split).
 
 The structural decision underneath: the runner does **not** own audio infrastructure. It sits inside a Pipecat pipeline as a custom `FrameProcessor` between context aggregation and LLM dispatch. Pipecat handles transport, VAD, STT, TTS, frame plumbing, barge-in, smart endpointing — everything below the cognitive layer. The dispatcher owns flow state, three-method evaluation, routing, exit-path assigns, capability dispatch, event emission. This boundary keeps audio losses near zero while preserving full control over spec interpretation.
 
@@ -26,7 +26,7 @@ Evaluated alternatives:
 - **LiveKit Agents** — strong WebRTC story, but instructions-and-tool architecture flattens UX4 flow boundaries into prose. Wrong structural fit for graph-native interpretation.
 - **OpenAI Realtime API** — speech-to-speech model bypasses text-level intercept. Our dispatcher requires text dispatch between user and assistant turns; Realtime closes off that seam.
 - **Native audio (own VAD/AEC/transports)** — multi-engineer-year effort with zero differentiation. Rejected.
-- **`pipecat-flows`** — Pipecat's own node-graph add-on (separate from `pipecat-ai`). Looks superficially like UX4 but inverts the canonicality direction: it defines its own `NodeConfig` schema and treats every transition as an LLM-judged function call. Adopting it would mean either (a) codegen UX4 specs to pipecat-flows nodes, which is the codegen-per-target tax we explicitly rejected ("Why a runner at all" §1), or (b) author specs in pipecat-flows' shape, demoting UX4's schema to a non-canonical view. Either way the three-method substrate doesn't survive — pipecat-flows has no concept of `calculation` or `direct` exits evaluated locally; everything goes through the LLM. We'd pay inference cost for `drink_type == "coffee"`. Plus owning a framework-agnostic dispatcher is what lets the same executor power whatsupp2's text simulator (no Pipecat involved). **Conclusion: pipecat-ai for everything below cognition; the dispatcher above it is ours.**
+- **`pipecat-flows`** — Pipecat's own node-graph add-on (separate from `pipecat-ai`). Looks superficially like UX4 but inverts the canonicality direction: it defines its own `NodeConfig` schema and treats every transition as an LLM-judged function call. Adopting it would mean either (a) codegen UX4 specs to pipecat-flows nodes, which is the codegen-per-target tax we explicitly rejected ("Why a runner at all" §1), or (b) author specs in pipecat-flows' shape, demoting UX4's schema to a non-canonical view. Either way the three-method substrate doesn't survive — pipecat-flows has no concept of `calculation` or `direct` exits evaluated locally; everything goes through the LLM. We'd pay inference cost for `drink_type == "coffee"`. Plus owning a framework-agnostic dispatcher keeps the text-mode debugger small and independent (no Pipecat involved). **Conclusion: pipecat-ai for everything below cognition; the dispatcher above it is ours.**
 
 Pipecat wins on architectural fit (frame pipeline matches the dispatcher-as-processor model), browser/local dev story (`SmallWebRTCTransport` exchanges SDP over a single HTTP endpoint, browser side is vanilla `RTCPeerConnection`), provider breadth (Deepgram/Cartesia/ElevenLabs/OpenAI/Anthropic all first-class), community depth, and frame-level event granularity that maximizes future canvas fidelity.
 
@@ -41,12 +41,12 @@ The first demo target is **browser-microphone voice with live canvas highlightin
 
 ## The runner's role in the stack
 
-For the full layer model and where each concept lives, see [STRATEGY.md](../uxflows/STRATEGY.md). For the runner specifically:
+For the full layer model and where each concept lives, see [STRATEGY.md](../whatsupp2/STRATEGY.md). For the runner specifically:
 
 - It interprets the spec live, drives **voice** (Pipecat pipeline) or **text** (WebSocket) I/O depending on `agent.meta.modes` at session start, and emits a single UX4-id-keyed event stream.
 - One dispatcher, two I/O adapters — voice and text share the cognitive layer. Mode is selected per session; the same spec can run either way without re-authoring.
-- That event stream has multiple subscribers in time order: the editor consumes it today (canvas highlighting); whatsupp2's simulator consumes it next (Phase E in STRATEGY.md); production observability could consume it eventually.
-- The runner has **dual identity by design** — prototyping component when invoked from the editor, simulation substrate when invoked by whatsupp2. One executor, two roles, two channels.
+- The editor consumes the event stream for canvas highlighting. Other consumers can subscribe as needed (production observability, future tooling).
+- The runner's role is prototyping infrastructure for uxflows. Whatsupp2 wraps endpoints directly (LLM API, S2S vendor, customer runtime, or the runner if the agent under test happens to live there) — no designed dependency on the runner.
 
 Boundaries the runner respects:
 
@@ -590,7 +590,6 @@ The visual payoff phase. By now the runner emits a clean event stream that the s
 - **Phone telephony / Patter integration.** Browser is the v0 demo target. Patter (or Pipecat's Daily transport) swaps in as the audio adapter when a deployment requires PSTN. Dispatcher unchanged.
 - **Bidirectional control plane.** Pause / step / inject user input via websocket. Debugging UX, not v0.
 - **Multi-session / multi-user runner.** v0 is single-user, single-session, localhost. SaaS shape is a bigger decision than the runner.
-- **Reusing the dispatcher in whatsupp2's text simulator.** Strategic — sim/prod parity through one executor — but a separate effort. The framework-agnostic dispatcher boundary makes it possible without rework.
 
 ## Open questions
 
