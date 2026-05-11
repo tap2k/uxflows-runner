@@ -16,7 +16,6 @@ uxflows-runner is one of three sibling repos that compose UX4. Read these before
 - [`../uxflows/AGENTS.md`](../uxflows/AGENTS.md) — editor architecture, mission, schema rationale.
 - [`../uxflows/SCHEMA.md`](../uxflows/SCHEMA.md) — v0 + v1 spec schema (the contract).
 - [`../whatsupp2/STRATEGY.md`](../whatsupp2/STRATEGY.md) — cross-repo product strategy and roadmap.
-- [`../whatsupp2/AGENT-TESTING.md`](../whatsupp2/AGENT-TESTING.md) — simulation/evaluation product design.
 - [RUNNER-PLAN.md](./RUNNER-PLAN.md) — operational plan for this runner: phases, decisions, risks, open questions.
 
 The schema is the contract across all three repos. The runner imports nothing from uxflows; it consumes a v0 JSON file and writes events.
@@ -30,7 +29,7 @@ Two consumers by design:
 1. **Standalone debug pages** at [web/](./web/) — runner-served debug surfaces (voice via vanilla `RTCPeerConnection` + `getUserMedia`; text via vanilla `fetch()`; bare audio for STT/VAD triage). Self-contained: one process serves the pages and the API endpoints.
 2. **Editor canvas integration** — second consumer of the same event stream; lives in [`../uxflows/`](../uxflows/), not here. Already consumes the text endpoints via [`SimulatePanel.tsx`](../uxflows/components/runtime/SimulatePanel.tsx) + [`lib/store/simulate.ts`](../uxflows/lib/store/simulate.ts) (active flow + edge highlight on the canvas).
 
-The runner's role is prototyping infrastructure for uxflows — designer hits Run, talks to the agent, the editor canvas highlights live. Whatsupp2 wraps endpoints directly and does not depend on the runner.
+The runner is currently used to test and visualize flows on the uxflows editor canvas — designer hits Run, talks to the agent, canvas lights up live. Eventually may become a standalone graph runtime.
 
 ## Tech Stack
 
@@ -44,7 +43,7 @@ For v0, the provider stack is **Google all-three** (Gemini 2.5 Flash via Vertex,
 
 ## Module Boundaries
 
-The dispatcher (spec interpreter) **must stay framework-agnostic**. This is the deliberate hedge that lets us swap to Patter for telephony, or reuse the dispatcher inside whatsupp2's text simulator, without rework.
+The dispatcher (spec interpreter) **must stay framework-agnostic**. This is the deliberate hedge that lets us swap to Patter for telephony — or any other audio/transport backend — without touching the dispatcher core.
 
 - **Pipecat-specific code is confined to** `src/uxflows_runner/server/pipeline.py` (voice pipeline assembly) and `src/uxflows_runner/dispatcher/processor.py` (the `FrameProcessor` wrappers + tool handlers around `apply_tool_call`).
 - **The rest of the dispatcher** (`methods.py`, `expressions.py`, `assigns.py`, `routing.py`, `capabilities.py`, `prompt_builder.py`, `flow_state.py`, `session.py`) imports nothing from Pipecat. Text mode (`server/text_session.py`) drives them directly without a pipeline.

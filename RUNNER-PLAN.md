@@ -46,13 +46,13 @@ For the full layer model and where each concept lives, see [STRATEGY.md](../what
 - It interprets the spec live, drives **voice** (Pipecat pipeline) or **text** (WebSocket) I/O depending on `agent.meta.modes` at session start, and emits a single UX4-id-keyed event stream.
 - One dispatcher, two I/O adapters — voice and text share the cognitive layer. Mode is selected per session; the same spec can run either way without re-authoring.
 - The editor consumes the event stream for canvas highlighting. Other consumers can subscribe as needed (production observability, future tooling).
-- The runner's role is prototyping infrastructure for uxflows. Whatsupp2 wraps endpoints directly (LLM API, S2S vendor, customer runtime, or the runner if the agent under test happens to live there) — no designed dependency on the runner.
+- The runner's role is prototyping infrastructure for uxflows — designer hits Run in the editor, talks to the agent, the canvas highlights live.
 
 Boundaries the runner respects:
 
 - API keys, endpoints, voice IDs → execution config (sibling to spec, never inside).
 - Capability backends (HTTP/MCP), knowledge backends (retrieval) → customer-owned. The runner dispatches *to* them; UX4 doesn't build them.
-- Scenario asserts, personas, evaluator logic → simulation layer (whatsupp2). Not the runner's concern.
+- Scenario asserts, personas, evaluator logic → simulation/eval layer, wherever it lives. Not the runner's concern.
 
 ## Goal
 
@@ -154,12 +154,7 @@ uxflows-runner/
 **Two consumers of the runner, by design:**
 
 1. **Standalone test page** (`web/` above) — runner-served debug surface. Self-contained: drop creds, run the runner, open `http://localhost:8000`, talk to it. No editor needed. Stays as a debug tool forever; doesn't disappear when the editor integration lands.
-2. **Editor canvas integration** (Phase 2+) — the editor consumes the *same* event stream the test page does, and renders runtime state on the canvas (active flow ring, edge pulse on routing). Lives in [uxflows](./), under fixed module roots:
-   - `lib/runtime/sseClient.ts` — open SSE connection, decode events into the store
-   - `lib/runtime/eventTypes.ts` — TypeScript mirror of `events/schema.py`
-   - `lib/store/runtime.ts` — zustand slice
-   - `pages/run.tsx` *or* a runtime overlay mounted at the editor shell — single mount point per the discipline below
-   - Canvas reads runtime state via node/edge `data` props; no direct store imports from `FlowNode` / edges
+2. **Editor canvas integration** — the editor consumes the *same* event stream the test page does, and renders runtime state on the canvas (active flow ring, edge pulse on routing). Implementation lives in [`../uxflows/`](../uxflows/); the runner sets the event/HTTP contract, the editor owns how it consumes that contract.
 
 ## Design decisions
 
@@ -181,30 +176,11 @@ For v0, the runner loads the spec on `POST /run` and treats it as immutable for 
 
 The runner pushes events via SSE; the editor never queries the runner for state. The editor's runtime store is built up from the event stream alone. This keeps the contract one-directional and replayable — record the event log, replay it later, get an identical canvas illumination experience. Bidirectional control (pause, step, inject) is deferred to a future websocket channel.
 
-**Event payloads must carry UX4 stable IDs at every emit site** (`flow_id`, `exit_path_id`, `guardrail_id`, `capability_id`). The same event stream powers the editor canvas today and will power whatsupp2's eval-on-canvas overlay later — guardrail-fail rates and scenario coverage pinned to the same nodes the spec defines. ID stability across the stream is the interop contract; treat event-shape changes as breaking.
+**Event payloads must carry UX4 stable IDs at every emit site** (`flow_id`, `exit_path_id`, `guardrail_id`, `capability_id`). The editor canvas reads these IDs to light up the right nodes; replay tools and other future consumers will too. ID stability across the stream is the interop contract; treat event-shape changes as breaking.
 
 ### Dispatcher must stay framework-agnostic
 
-The dispatcher's interface is `dispatch(user_text, flow_state, variables) -> (assistant_text, transitions, events)`. Pipecat-specific code is confined to `dispatcher/processor.py` (the `FrameProcessor` wrapper) and `server/pipeline.py`. The core dispatcher logic in `methods.py`, `expressions.py`, `assigns.py`, `routing.py`, `capabilities.py`, `prompt_builder.py` knows nothing about Pipecat. This is the deliberate hedge: if we ever want to swap to Patter for production telephony, or reuse the dispatcher inside whatsupp2's text simulator, the swap is bounded to the integration glue.
-
-### Editor-side module boundaries
-
-The runner UI is embedded in the uxflows editor but kept as an independent component code-wise. The discipline:
-
-- **One-way dependency.** Runtime code can read authoring state (it needs the spec), but authoring code never imports from `lib/runtime/*` or `components/runtime/*`. The arrow points one direction.
-- **Module homes.** All runtime code lives under fixed roots: `components/runtime/` (RunControl, TranscriptPanel, VariablesPanel, AudioBridge), `lib/store/runtime.ts` (separate zustand slice or store), `lib/runtime/sseClient.ts`, `lib/runtime/audioBridge.ts`, `lib/runtime/eventTypes.ts`. Nothing runtime-related leaks into `lib/schema/`, `lib/store/spec.ts`, `components/inspector/`, or `components/sheets/`.
-- **Single mount point.** A `<RuntimeOverlay />` (or similar) renders once at the editor shell when a session is active. Runtime UI is not woven into inspector forms or sheet components.
-- **The narrow seam.** The canvas reads runtime state to render highlighting — the only place authoring-side code touches runtime data. It does so through node/edge `data` props (`runtimeState`, `pulse`) computed in `buildGraph` from a single runtime selector. `FlowNode` and edges read those props; they don't import the runtime store directly.
-- **Snapshot-on-run.** Runtime code does not mutate the spec or freeze the editor's spec store. The runner takes a spec snapshot at session start and works against the snapshot for the session's duration; the editor's spec stays editable.
-- **Provider keys / execution config** belong to the runtime module's settings surface, not the editor's general settings.
-
-What this buys: clean test isolation (authoring tests don't need to mock the runtime), future extractability (the runtime module has a defined boundary if we ever want a separate viewer/replay app), and the kind of mental clarity that prevents authoring code from gaining "Run-mode" branches over time.
-
-What violates it (watch for):
-- Inspector forms gaining a "while running" branch.
-- Authoring code reading `runtime.connected` to disable controls.
-- Runtime code calling editor mutators to "freeze the spec."
-- Provider keys ending up in a generic editor `Settings` modal.
+The dispatcher's interface is `dispatch(user_text, flow_state, variables) -> (assistant_text, transitions, events)`. Pipecat-specific code is confined to `dispatcher/processor.py` (the `FrameProcessor` wrapper) and `server/pipeline.py`. The core dispatcher logic in `methods.py`, `expressions.py`, `assigns.py`, `routing.py`, `capabilities.py`, `prompt_builder.py` knows nothing about Pipecat. This is the deliberate hedge: if we ever want to swap to Patter for production telephony, the swap is bounded to the integration glue.
 
 ### One LLM call per turn
 
@@ -509,16 +485,14 @@ Brought forward from "Out of scope for v0" because the editor needed a text-chat
 
 **One refactor seam worth knowing about:** `apply_tool_call` is now the canonical "resolve LLM tool args + mutate state + maybe re-plan" function. Voice mode's `_take_exit_path`/`_trigger_interrupt` handlers wrap it with Pipecat's `result_callback` + `LLMRunFrame` follow-up; text mode calls it directly and does the follow-up via a second `generate_content_async` call. **Both modes share the same dispatch logic.** This is the framework-agnostic boundary [§"Dispatcher must stay framework-agnostic"](#dispatcher-must-stay-framework-agnostic) commits to, made concrete.
 
-**Whatsupp2 integration deliberately not built.** The runner's sessioned shape doesn't match `callAgent`'s stateless contract; making it work needs a session-aware `callAgent` in whatsupp2, not a stateless shim in the runner (which would silently drift on any spec with assigns/transitions). See [§"Future: whatsupp2 integration"](#future-whatsupp2-integration) below for the full reasoning. The runner's `/api/chat/*` endpoints are already what whatsupp2 will call when that work lands; no runner-side change needed.
-
 **Silent-take_exit follow-up:** Live testing surfaced a third sibling of the [§"Live-test follow-up"](#live-test-follow-up-2026-04-30-evening) Gemini quirks — sometimes `take_exit_path` fires with NO text part, just the tool call. State mutates correctly but the user gets nothing to read. The text adapter handles this with a structurally-safe follow-up: if `decision.kind == "take_exit"` AND `text == ""` AND not ended, run ONE more inference with **tools dropped** (`include_tools=False` in `_run_inference`). No tools = no risk of chained transitions or a premature cancel/confirm; the model can only produce words. Capped at one follow-up per turn.
 
-**Context vars (added 2026-05-04):** `/api/chat/session` accepts an optional `context_vars: dict[str, Any]`. At session start, the runner merges these into the dispatcher's variable bag (read by `calculation`-method conditions, capability inputs, etc.) AND uses them to substitute `{KEY}` placeholders in the composed system prompt via a new [`prompt_builder.substitute_variables`](src/uxflows_runner/dispatcher/prompt_builder.py) helper. Case-insensitive; **unfilled placeholders stay as `{KEY}` literal** (matches whatsupp2's `resolvePromptVariables` semantics — loud is better than silent for designer debugging). Substitution happens as a final pass over the composed prompt so all sections (system_prompt, instructions, scripts, FAQ, glossary) get covered uniformly. Re-runs on every turn via `plan_for_active_flow`, so values that mutate via assigns stay current in the prompt. **Does NOT emit `variable_set` events** for seeded vars — those are reserved for exit-path-fired assigns.
+**Context vars (added 2026-05-04):** `/api/chat/session` accepts an optional `context_vars: dict[str, Any]`. At session start, the runner merges these into the dispatcher's variable bag (read by `calculation`-method conditions, capability inputs, etc.) AND uses them to substitute `{KEY}` placeholders in the composed system prompt via a new [`prompt_builder.substitute_variables`](src/uxflows_runner/dispatcher/prompt_builder.py) helper. Case-insensitive; **unfilled placeholders stay as `{KEY}` literal** — loud is better than silent for designer debugging. Substitution happens as a final pass over the composed prompt so all sections (system_prompt, instructions, scripts, FAQ, glossary) get covered uniformly. Re-runs on every turn via `plan_for_active_flow`, so values that mutate via assigns stay current in the prompt. **Does NOT emit `variable_set` events** for seeded vars — those are reserved for exit-path-fired assigns.
 
 **Voice-mode parity** ✅ shipped 2026-05-08. The two Phase-1.5 text-only behaviors now have voice equivalents:
 
 - **Silent-take_exit follow-up.** [`TextFrameWatcher`](src/uxflows_runner/dispatcher/processor.py) sits between `llm` and `tts`, flipping `session.text_emitted_this_turn = True` on any `LLMTextFrame`. The `_take_exit_path` handler reads the flag after `apply_tool_call`: on a `take_exit` decision with no text fired and not ended, it sets `llm_context.set_tools(NOT_GIVEN)`, sets `session.skip_next_planning = True`, and pushes an `LLMRunFrame()`. PreLLMPlanner consumes the skip flag on the next pass so the follow-up runs text-only. Mirrors text mode's `_run_inference(include_tools=False)` shape; reuses the same Pipecat seam.
-- **`context_vars` on `/api/offer`.** Body extension field alongside `spec`. `run_session` seeds the variable bag after `Session.start` and rebuilds the initial system prompt with `variables=` so `{KEY}` placeholders substitute. Same semantics as `/api/chat/session` (no `variable_set` events emitted for seeded vars). Justification isn't voice-mode-parity-for-its-own-sake; it's that eval/sim — the structurally-most-likely next consumer of either endpoint, per [§"Future: whatsupp2 integration"](#future-whatsupp2-integration) — needs to seed scenario context (account state, persona attributes, mocked customer values) regardless of which I/O mode the simulated session runs in. Uniform field across both endpoints is the right shape for that. Telephony's caller-ID-driven shape can layer on top — it'd just call `run_session` with different inputs.
+- **`context_vars` on `/api/offer`.** Body extension field alongside `spec`. `run_session` seeds the variable bag after `Session.start` and rebuilds the initial system prompt with `variables=` so `{KEY}` placeholders substitute. Same semantics as `/api/chat/session` (no `variable_set` events emitted for seeded vars). Justification: designers iterating in the editor need to seed scenario context (account state, persona attributes, mocked customer values) regardless of which I/O mode the test session runs in. Uniform field across both endpoints is the right shape for that. Telephony's caller-ID-driven shape can layer on top — it'd just call `run_session` with different inputs.
 
 **Known limitations (text + voice both):**
 - Walkaway gap (Phase 1's existing rough edge) applies to text mode too — Gemini sometimes responds to a graceful-goodbye user turn with text only, no `take_exit_path`, leaving the session "live" until idle GC. Same as voice; not text-specific. (Distinct from the silent-take_exit case above: walkaway = no tool call at all; silent-take_exit = tool call but no text.)
@@ -597,47 +571,6 @@ The visual payoff phase. By now the runner emits a clean event stream that the s
 - Where does `execution.json` live? Proposal: alongside the spec, in the runner's working directory. The editor never sees it. (Phase 1.5 added a `execution_endpoints` constructor arg on `TextSession` for editor-driven config; not yet wired through the API.)
 - How does the editor know *which* runner to talk to? v0 assumes `localhost:8000`. Configurable via a setting later.
 - ~~Do we need a session id at all in v0?~~ ✅ Resolved with Phase 1.5 — text adapter requires it (multi-turn HTTP with no transport-level state). Voice mode's per-WebRTC-connection model also implicitly has one. Surfaced explicitly in `/api/chat/session` response.
-
-## Future: whatsupp2 integration
-
-The endpoints Phase 1.5 ships (`/api/chat/session` + `/api/chat/turn`) are *also* the API whatsupp2's agent-testing loop will eventually call when the runner becomes the canonical "agent under test." This section documents that intent and — more importantly — why it's **not** blocking work for the runner, and why no compatibility shim should be added on the runner side to make it look closer.
-
-### The shape mismatch
-
-[`whatsupp2/hooks/simulate.js`](../whatsupp2/hooks/simulate.js)'s `callAgent({agentConfig, messages, persona, apiKeys})` is **stateless** — every call ships the full transcript and gets `{content}` back. The function is pure of session state; the transcript IS the conversation. That's what every external agent endpoint looks like (OpenAI's API, anyone's chatbot endpoint), and it's the contract `execution.endpoint` was designed for ([`AGENT-CLAUDE.md` L42-43](../whatsupp2/AGENT-CLAUDE.md)).
-
-The runner's dispatcher is **stateful by design**. The flow stack, variable bag, and interrupt context are not derivable from the transcript:
-
-- "yes" on turn N can be a routing answer or an interrupt response — the state machine knows which, the transcript doesn't.
-- A `variable_set` may fire on turn 5's exit even though the user said the captured value on turn 1.
-- An interrupt push/pop looks like a digression in text but is structurally distinct in state.
-
-So a "stateless turn endpoint that re-runs the dispatcher each call from the transcript" is **semantically broken** for any non-trivial spec — same input, different routing, different assigns, sometimes different replies than the sessioned path. This would silently produce sim/prod drift, which is exactly what [§"Why a runner at all"](#why-a-runner-at-all) exists to prevent. **Do not add such an endpoint to the runner**, even when asked, even with a docstring warning. The compatibility cost shows up later as evaluation findings nobody can reproduce.
-
-### Where the move has to happen
-
-To wire whatsupp2 cleanly, **`callAgent` evolves to be session-aware** — not the runner reshaping itself to look stateless:
-
-- At conversation start, call `/api/chat/session` once with the snapshot spec from `config_snapshot.spec` and the BYOK key from `apiKeys.google`. Stash `session_id` on `interview.metadata.runner_session_id` (or a dedicated column).
-- Per turn, call `/api/chat/turn { session_id, user_text }` and read `agent_text` + `events`.
-- On `ended: true`, drop the session id; the run loop terminates.
-- The `events` stream is upside — extend the evaluator to consume `exit_path_taken` / `variable_set` / `capability_invoked` once whatsupp2 cares (the `AGENT-CLAUDE.md` "Pending — Capability invocation evaluation" item is exactly this).
-
-This is a real contract change in whatsupp2, not a wrapper:
-- `callAgent`'s signature gains DB access (`interviewId`, `supabase`) to read/write the session id.
-- Four call sites change ([`hooks/simulate.js:117, 487, 837`](../whatsupp2/hooks/simulate.js); [`pages/api/callagent.js:25`](../whatsupp2/pages/api/callagent.js)).
-- The stateless [`pages/api/callagent.js`](../whatsupp2/pages/api/callagent.js) Chat tab — which has nowhere to persist a session id — either grows ad-hoc per-request session creation (cheap, throwaway) or stays on the existing system-prompt path (`execution.endpoint` empty). Both work.
-- New failure modes: session expiry mid-run, runner restarts, `interview_id` reuse.
-
-Estimated half-day in whatsupp2, not catastrophic — but **a whatsupp2-side decision driven by a whatsupp2-side need.**
-
-### Disposition
-
-- ✅ The runner ships the right endpoints.
-- ❌ The runner does **not** ship a stateless compatibility endpoint.
-- 🔜 The integration lands when whatsupp2 prioritizes session-aware `callAgent`. Tracked there, not blocking here.
-
-When that work starts, the runner side should need zero changes — the `/api/chat/*` endpoints are already what whatsupp2 will call.
 
 ## Future: SimulatePanel voice mode
 
