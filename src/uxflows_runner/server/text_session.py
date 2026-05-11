@@ -51,9 +51,6 @@ from uxflows_runner.events.schema import Event, SessionEnded
 from uxflows_runner.spec.loader import LoadedSpec
 
 
-DEFAULT_MODEL = "gemini-2.5-flash"
-
-
 @dataclass
 class TextSession:
     session: Session
@@ -99,18 +96,20 @@ class TextSession:
         )
         entry_flow = spec.entry_flow
 
+        cfg = config or Config.from_env()
+        chosen_model = model or cfg.llm_model
+
         if api_key:
             llm = GoogleLLMService(
                 api_key=api_key,
-                settings=GoogleLLMService.Settings(model=model or DEFAULT_MODEL),
+                settings=GoogleLLMService.Settings(model=chosen_model),
             )
         else:
-            cfg = config or Config.from_env()
             llm = GoogleVertexLLMService(
                 credentials_path=cfg.google_credentials_path,
                 project_id=cfg.google_project_id,
                 location=cfg.google_location,
-                settings=GoogleVertexLLMService.Settings(model=model or cfg.llm_model),
+                settings=GoogleVertexLLMService.Settings(model=chosen_model),
             )
 
         events = BufferingEventEmitter()

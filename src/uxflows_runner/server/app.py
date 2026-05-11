@@ -45,7 +45,6 @@ from uxflows_runner.server.pipeline import run_session
 from uxflows_runner.server.pipeline_raw import run_raw_session
 from uxflows_runner.server.text_registry import TextSessionRegistry
 from uxflows_runner.server.text_session import (
-    DEFAULT_MODEL,
     SessionAlreadyEnded,
     TextSession,
 )
