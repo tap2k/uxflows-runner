@@ -119,6 +119,7 @@ class Action(Strict):
 class ExitPath(Strict):
     id: str
     type: ExitPathType
+    notes: str | None = None  # authoring annotation; ignored by runtime
     condition: Condition | None = None  # optional on return_to_caller — when present, surfaces as the per-exit hint in take_exit_path
     next_flow_id: str | None = None
     assigns: dict[str, Assign] = Field(default_factory=dict)
@@ -147,6 +148,7 @@ class Flow(Strict):
     scripts: dict[str, list[Script]] = Field(default_factory=dict)
     guardrails: list[Guardrail] = Field(default_factory=list)
     max_turns: int | None = None
+    notes: str | None = None  # authoring annotation; ignored by runtime
     example: str | None = None
     knowledge: FlowKnowledge | None = None
     variables: dict[str, VariableDecl] = Field(default_factory=dict)
