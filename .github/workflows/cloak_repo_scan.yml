@@ -1,0 +1,73 @@
+name: Cloak SOC 2 Scan
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  cloak-scan:
+    name: SOC 2 compliance scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build repository archive
+        run: git archive HEAD --format=zip -o repo.zip
+
+      - name: Upload and start Cloak scan
+        id: cloak
+        run: |
+          RESPONSE=$(curl -sf -X POST "$CLOAK_BASE_URL/integrations/repo-scans" \
+            -H "Authorization: Bearer $CLOAK_API_TOKEN" \
+            -F "file=@repo.zip" \
+            -F "project_id=${{ github.repository }}" \
+            -F "repo_full_name=${{ github.repository }}" \
+            -F "branch_name=${{ github.ref_name }}" \
+            -F "commit_sha=${{ github.sha }}" \
+            -F "trigger_source=${{ github.event_name == 'pull_request' && 'pull_request' || 'push' }}" \
+            -F "pull_request_number=${{ github.event.pull_request.number || '' }}" \
+            -F "base_commit_sha=${{ github.event.pull_request.base.sha || '' }}")
+          RUN_ID=$(echo "$RESPONSE" | jq -r '.data.run_id')
+          echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
+          echo "Scan started: $RUN_ID"
+        env:
+          CLOAK_BASE_URL: ${{ secrets.CLOAK_BASE_URL }}
+          CLOAK_API_TOKEN: ${{ secrets.CLOAK_API_TOKEN }}
+
+      - name: Wait for scan to complete
+        run: |
+          RUN_ID="${{ steps.cloak.outputs.run_id }}"
+          for i in $(seq 1 36); do
+            STATUS=$(curl -sf "$CLOAK_BASE_URL/scans/$RUN_ID" \
+              -H "Authorization: Bearer $CLOAK_API_TOKEN" \
+              | jq -r '.data.status // empty')
+            echo "Attempt $i: status=$STATUS"
+            case "$STATUS" in
+              completed|completed_with_errors) echo "Scan complete."; break ;;
+              failed) echo "::error::Cloak scan pipeline error"; exit 1 ;;
+            esac
+            sleep 10
+          done
+        env:
+          CLOAK_BASE_URL: ${{ secrets.CLOAK_BASE_URL }}
+          CLOAK_API_TOKEN: ${{ secrets.CLOAK_API_TOKEN }}
+
+      - name: Check CI decision
+        run: |
+          RUN_ID="${{ steps.cloak.outputs.run_id }}"
+          CI_JSON=$(curl -sf "$CLOAK_BASE_URL/scans/$RUN_ID/ci.json" \
+            -H "Authorization: Bearer $CLOAK_API_TOKEN")
+          DECISION=$(echo "$CI_JSON" | jq -r '.data.run_outcome.decision // "pass"')
+          echo "Cloak decision: $DECISION"
+          if [ "$DECISION" = "block" ]; then
+            echo "::error title=Cloak SOC 2 Blocked::Code issues found. View: $CLOAK_BASE_URL/../scan/$RUN_ID"
+            exit 1
+          fi
+          echo "Cloak SOC 2 scan passed."
+        env:
+          CLOAK_BASE_URL: ${{ secrets.CLOAK_BASE_URL }}
+          CLOAK_API_TOKEN: ${{ secrets.CLOAK_API_TOKEN }}
+
