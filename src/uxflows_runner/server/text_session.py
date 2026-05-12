@@ -91,9 +91,10 @@ class TextSession:
         capability inputs. Not emitted as `variable_set` events (those are
         for exit-path-fired assigns; these are session-start seeds).
         """
-        lang = language or (
-            spec.agent.meta.languages[0] if spec.agent.meta.languages else "en-US"
-        )
+        # No fallback: None means "all languages" — the prompt builder emits
+        # every script bucket. Clients that want single-language behavior
+        # pass `language` explicitly.
+        lang = language
         entry_flow = spec.entry_flow
 
         cfg = config or Config.from_env()

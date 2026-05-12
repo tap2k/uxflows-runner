@@ -13,6 +13,7 @@ const pickSpecBtn = $("pick-spec");
 const clearSpecBtn = $("clear-spec");
 const specFileInput = $("spec-file");
 const specSummary = $("spec-summary");
+const languageSelect = $("language");
 
 let pc = null;
 let localStream = null;
@@ -54,6 +55,28 @@ const updateSpecUI = () => {
     clearSpecBtn.hidden = true;
     connectBtn.disabled = true;
   }
+  populateLanguages(currentSpec);
+};
+
+const populateLanguages = (spec) => {
+  // Default to "all" (empty value). Concrete options come from
+  // agent.meta.languages, locked once a session is connected. Hidden entirely
+  // when 0 or 1 language is configured — there's nothing to choose between.
+  const langs = spec?.agent?.meta?.languages ?? [];
+  languageSelect.innerHTML = "";
+  const all = document.createElement("option");
+  all.value = "";
+  all.textContent = "all languages";
+  languageSelect.appendChild(all);
+  for (const code of langs) {
+    const opt = document.createElement("option");
+    opt.value = code;
+    opt.textContent = code;
+    languageSelect.appendChild(opt);
+  }
+  languageSelect.value = "";
+  languageSelect.disabled = !spec || pc !== null;
+  languageSelect.hidden = langs.length <= 1;
 };
 
 const loadSpecFromText = (text, name) => {
@@ -89,6 +112,7 @@ const loadSpecFromFile = async (file) => {
 async function connect() {
   clearError();
   connectBtn.disabled = true;
+  languageSelect.disabled = true;
   setStatus("connecting", "connecting…");
   log("requesting microphone");
 
@@ -144,6 +168,9 @@ async function connect() {
     if (currentSpec) {
       offerBody.spec = currentSpec;
     }
+    if (languageSelect.value) {
+      offerBody.language = languageSelect.value;
+    }
     const res = await fetch("/api/offer", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -177,8 +204,9 @@ function teardown() {
   }
   remoteAudio.srcObject = null;
   setStatus("idle", "idle");
-  connectBtn.disabled = false;
+  connectBtn.disabled = !currentSpec;
   disconnectBtn.disabled = true;
+  languageSelect.disabled = !currentSpec;
 }
 
 connectBtn.addEventListener("click", connect);

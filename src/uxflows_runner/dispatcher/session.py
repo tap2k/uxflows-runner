@@ -49,8 +49,10 @@ class Session:
         capabilities: CapabilityDispatcher | None = None,
         language: str | None = None,
     ) -> "Session":
-        lang = language or (spec.agent.meta.languages[0] if spec.agent.meta.languages else "en-US")
-        state = FlowState.start(spec.agent.entry_flow_id, language=lang)
+        # No fallback: None means "all languages" — the system prompt emits
+        # every script bucket. The caller decides whether to default to a
+        # specific language at the API boundary.
+        state = FlowState.start(spec.agent.entry_flow_id, language=language)
         return cls(
             spec=spec,
             state=state,

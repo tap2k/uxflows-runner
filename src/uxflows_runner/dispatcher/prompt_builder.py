@@ -64,9 +64,11 @@ def substitute_variables(text: str, variables: dict[str, Any] | None) -> str:
 def build_system_prompt(
     agent: Agent,
     flow: Flow,
-    lang: str,
+    lang: str | None,
     variables: dict[str, Any] | None = None,
 ) -> str:
+    """`lang=None` means "all languages" — emit every script bucket and every
+    per-language FAQ override. A concrete code filters to just that bucket."""
     sections: list[str] = []
     if agent.system_prompt:
         sections.append(agent.system_prompt.strip())
@@ -99,17 +101,24 @@ def build_system_prompt(
     if flow.knowledge and flow.knowledge.faq:
         sections.append("Flow-specific FAQ:\n" + _format_faq(flow.knowledge.faq, lang))
 
-    scripts = flow.scripts.get(lang) or []
-    if scripts:
-        lines: list[str] = []
+    # When lang is set, emit only that bucket. When None, emit every bucket
+    # the flow has — useful for inspection and multilingual prompt previews.
+    script_langs = [lang] if lang else list(flow.scripts.keys())
+    bucket_lines: list[str] = []
+    for code in script_langs:
+        scripts = flow.scripts.get(code) or []
+        if not scripts:
+            continue
+        bucket_lines.append(f"({code})")
         for s in scripts:
-            lines.append(f"- {s.text}")
+            bucket_lines.append(f"- {s.text}")
             for v in s.variations:
                 if v:
-                    lines.append(f"  | {v}")
+                    bucket_lines.append(f"  | {v}")
+    if bucket_lines:
         sections.append(
-            f"Sample lines you might use ({lang}) — paraphrase, don't recite verbatim:\n"
-            + "\n".join(lines)
+            "Sample lines you might use — paraphrase, don't recite verbatim:\n"
+            + "\n".join(bucket_lines)
         )
 
     # Two short tool-use reminders. Both compensate for Gemini behaviors we
@@ -261,10 +270,18 @@ def _trigger_interrupt_schema(
     )
 
 
-def _format_faq(entries, lang: str) -> str:
+def _format_faq(entries, lang: str | None) -> str:
     lines = []
     for entry in entries:
-        # Per-language script overrides the base answer if available.
-        answer = entry.scripts.get(lang) if entry.scripts else None
-        lines.append(f"- Q: {entry.question}\n  A: {answer or entry.answer}")
+        if lang:
+            # Single-language session: per-language script overrides the base.
+            answer = entry.scripts.get(lang) if entry.scripts else None
+            lines.append(f"- Q: {entry.question}\n  A: {answer or entry.answer}")
+        else:
+            # No language picked: surface the canonical answer plus every
+            # per-language variant the entry has.
+            lines.append(f"- Q: {entry.question}\n  A: {entry.answer}")
+            for code, text in (entry.scripts or {}).items():
+                if text:
+                    lines.append(f"  Say ({code}): {text}")
     return "\n".join(lines)

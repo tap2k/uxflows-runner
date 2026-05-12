@@ -114,9 +114,14 @@ async def webrtc_offer(request: Request):
     # request parser — it errors on unknown keys.
     raw_spec = body.pop("spec", None)
     context_vars = body.pop("context_vars", None)
+    language = body.pop("language", None)
     if context_vars is not None and not isinstance(context_vars, dict):
         raise HTTPException(
             status_code=400, detail="context_vars must be an object"
+        )
+    if language is not None and not isinstance(language, str):
+        raise HTTPException(
+            status_code=400, detail="language must be a string"
         )
     req = SmallWebRTCRequest.from_dict(body)
 
@@ -132,6 +137,7 @@ async def webrtc_offer(request: Request):
                 spec,
                 execution_config_path=app.state.config.execution_config_path,
                 context_vars=context_vars,
+                language=language,
             )
         )
         app.state.tasks.add(task)

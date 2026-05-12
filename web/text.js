@@ -11,6 +11,7 @@ const els = {
   specSummary: $("spec-summary"),
   clearSpec: $("clear-spec"),
   apiKey: $("api-key"),
+  language: $("language"),
   start: $("start"),
   reset: $("reset"),
   errors: $("errors"),
@@ -64,7 +65,29 @@ function setSpec(spec, name) {
     els.specSummary.classList.remove("loaded");
     els.clearSpec.hidden = true;
   }
+  populateLanguages(spec);
   refreshButtons();
+}
+
+function populateLanguages(spec) {
+  // Default to "all" (empty value). Concrete options come from
+  // agent.meta.languages, locked once a session is running. Hidden entirely
+  // when 0 or 1 language is configured — there's nothing to choose between.
+  const langs = spec?.agent?.meta?.languages ?? [];
+  els.language.innerHTML = "";
+  const all = document.createElement("option");
+  all.value = "";
+  all.textContent = "all languages";
+  els.language.appendChild(all);
+  for (const code of langs) {
+    const opt = document.createElement("option");
+    opt.value = code;
+    opt.textContent = code;
+    els.language.appendChild(opt);
+  }
+  els.language.value = "";
+  els.language.disabled = !spec;
+  els.language.hidden = langs.length <= 1;
 }
 
 // ---------- start / reset / end ----------
@@ -88,6 +111,7 @@ async function startSession() {
   const body = {
     spec: state.spec,
     api_key: els.apiKey.value.trim() || undefined,
+    language: els.language.value || undefined,
   };
 
   try {
@@ -248,6 +272,7 @@ function refreshButtons() {
   els.reset.disabled = !state.spec || state.inflight;
   els.composer.disabled = !hasSession || state.ended || state.inflight;
   els.send.disabled = els.composer.disabled;
+  els.language.disabled = !state.spec || hasSession || state.inflight;
 }
 
 function setStatus(cls, label) {

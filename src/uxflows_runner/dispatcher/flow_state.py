@@ -27,10 +27,12 @@ class FlowState:
 
     stack: list[FlowFrame]
     variables: dict[str, Any] = field(default_factory=dict)
-    language: str = "en-US"
+    # None means "all languages" — the system prompt emits every script bucket.
+    # A concrete code (e.g. "en-US") filters to just that bucket.
+    language: str | None = None
 
     @classmethod
-    def start(cls, entry_flow_id: str, language: str = "en-US") -> "FlowState":
+    def start(cls, entry_flow_id: str, language: str | None = None) -> "FlowState":
         return cls(stack=[FlowFrame(flow_id=entry_flow_id)], language=language)
 
     @property

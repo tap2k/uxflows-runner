@@ -29,7 +29,7 @@ class _Base(BaseModel):
 class SessionStarted(_Base):
     type: Literal["session_started"] = "session_started"
     agent_id: str
-    lang: str
+    lang: str | None
     spec_hash: str
 
 

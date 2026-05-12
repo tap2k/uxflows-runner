@@ -49,6 +49,7 @@ async def run_session(
     spec: LoadedSpec,
     execution_config_path: str | None = None,
     context_vars: dict | None = None,
+    language: str | None = None,
 ) -> None:
     """Run a single voice session bound to one WebRTC peer connection.
 
@@ -80,7 +81,10 @@ async def run_session(
     )
 
     entry_flow = spec.entry_flow
-    lang = spec.agent.meta.languages[0] if spec.agent.meta.languages else "en-US"
+    # No fallback: None means "all languages" — the prompt builder emits every
+    # script bucket. Clients that want single-language behavior pass `language`
+    # explicitly via the /api/offer body.
+    lang = language
     # Build the context with a placeholder system message; we'll fill it in
     # below once context_vars (if any) have been seeded into the variable
     # bag, so {KEY} substitution sees them.

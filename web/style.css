@@ -109,7 +109,23 @@ h2 {
 
 .controls {
   display: flex;
+  align-items: center;
   gap: 8px;
+}
+
+.controls select {
+  margin-left: auto;
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.controls select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 button {
