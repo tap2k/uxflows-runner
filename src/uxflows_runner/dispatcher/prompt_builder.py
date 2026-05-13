@@ -111,13 +111,14 @@ def build_system_prompt(
             continue
         bucket_lines.append(f"({code})")
         for s in scripts:
-            bucket_lines.append(f"- {s.text}")
+            bucket_lines.append(f"- [{s.id}] {s.text}")
             for v in s.variations:
                 if v:
                     bucket_lines.append(f"  | {v}")
     if bucket_lines:
         sections.append(
-            "Sample lines you might use — paraphrase, don't recite verbatim:\n"
+            "Scripted lines — when instructions reference a script by [id], "
+            "say that line verbatim (pick any listed variation if present):\n"
             + "\n".join(bucket_lines)
         )
 
