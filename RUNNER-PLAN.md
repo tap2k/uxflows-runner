@@ -564,6 +564,8 @@ The visual payoff phase. By now the runner emits a clean event stream that the s
 - **Phone telephony / Patter integration.** Browser is the v0 demo target. Patter (or Pipecat's Daily transport) swaps in as the audio adapter when a deployment requires PSTN. Dispatcher unchanged.
 - **Bidirectional control plane.** Pause / step / inject user input via websocket. Debugging UX, not v0.
 - **Multi-session / multi-user runner.** v0 is single-user, single-session, localhost. SaaS shape is a bigger decision than the runner.
+- **Multi-language code-switching.** Within-turn or within-session language switching (e.g. Hinglish, Spanglish). Per-language scripts via the spec's translation columns are the v0 story; code-switching is a model-and-prompting problem on top, deferred until a customer flow needs it.
+- **Cost dashboard.** Per-session token / minute / dollar accounting surfaced in the runner UI. Useful once voice runs are routine and cost variance matters; not blocking v0.
 
 ## Open questions
 
