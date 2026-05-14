@@ -13,9 +13,59 @@ from pydantic import BaseModel, ConfigDict, Field
 
 Method = Literal["llm", "calculation", "direct"]
 FlowType = Literal["happy", "sad", "off", "utility", "interrupt"]
-ExitPathType = Literal["happy", "sad", "off", "exit", "return_to_caller"]
 CapabilityKind = Literal["retrieval", "function"]
 VarType = Literal["string", "number", "boolean", "enum"]
+
+# A translatable string. Either a plain string (monolingual; the value is in
+# the agent's default language) or a Record keyed by language code. The runner
+# resolves to a single string via `resolve_localized`.
+LocalizedString = str | dict[str, str]
+
+# Reserved `goto` keywords. Anything else is treated as a flow id reference.
+GOTO_END = "END"
+GOTO_RETURN = "RETURN"
+
+
+def is_end_goto(goto: str) -> bool:
+    return goto == GOTO_END
+
+
+def is_return_goto(goto: str) -> bool:
+    return goto == GOTO_RETURN
+
+
+def is_flow_goto(goto: str) -> bool:
+    return goto not in (GOTO_END, GOTO_RETURN)
+
+
+def default_language(languages: list[str] | None) -> str:
+    """First entry of `agent.meta.languages` is the default; fall back to "EN"
+    if languages is missing or empty (legacy / pre-multilingual specs)."""
+    if not languages:
+        return "EN"
+    return languages[0]
+
+
+def resolve_localized(
+    value: LocalizedString | None,
+    lang: str | None,
+    default_lang: str,
+) -> str:
+    """Resolve a LocalizedString to a single string. Fallback order:
+    requested lang → default lang → any value present → "".
+    `lang=None` is treated as the default language."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    effective_lang = lang or default_lang
+    if effective_lang in value:
+        return value[effective_lang]
+    if default_lang in value:
+        return value[default_lang]
+    for key in value:
+        return value[key]
+    return ""
 
 
 class Strict(BaseModel):
@@ -51,12 +101,13 @@ class Capability(Strict):
 
 
 class FAQEntry(Strict):
+    id: str
     question: str
-    answer: str
-    scripts: dict[str, str] = Field(default_factory=dict)
+    answer: LocalizedString
 
 
 class GlossaryEntry(Strict):
+    id: str
     term: str
     definition: str
 
@@ -117,24 +168,32 @@ class Action(Strict):
 
 
 class ExitPath(Strict):
+    """An edge out of a flow.
+
+    `goto` is either a flow id, or one of the reserved keywords:
+      - "END"     — terminate the conversation
+      - "RETURN"  — pop the call frame and resume the caller (or END at top level)
+
+    The old `type` (happy/sad/off/exit/return_to_caller) and `next_flow_id`
+    fields are gone — destinations come from `goto`, and tone labels derive
+    from the destination flow's type when needed.
+    """
+
     id: str
-    type: ExitPathType
+    goto: str
+    condition: Condition | None = None
     notes: str | None = None  # authoring annotation; ignored by runtime
-    condition: Condition | None = None  # optional on return_to_caller — when present, surfaces as the per-exit hint in take_exit_path
-    next_flow_id: str | None = None
     assigns: dict[str, Assign] = Field(default_factory=dict)
     actions: list[Action] = Field(default_factory=list)
 
 
-class Routing(Strict):
-    entry_condition: Condition | None = None
-    exit_paths: list[ExitPath] = Field(default_factory=list)
-
-
 class Script(Strict):
+    """A scripted line for one flow. `text` is a LocalizedString; `variations`
+    are per-language alternative phrasings."""
+
     id: str
-    text: str
-    variations: list[str] = Field(default_factory=list)
+    text: LocalizedString
+    variations: dict[str, list[str]] | None = None
 
 
 class Flow(Strict):
@@ -142,20 +201,25 @@ class Flow(Strict):
     id: str
     version: str | None = None
     name: str | None = None
-    description: str | None = None
     type: FlowType
-    scope: list[str] | None = None
     instructions: str | None = None
-    scripts: dict[str, list[Script]] = Field(default_factory=dict)
+    entry_condition: Condition | None = None
+    exit_paths: list[ExitPath] = Field(default_factory=list)
+    scripts: list[Script] = Field(default_factory=list)
     guardrails: list[Guardrail] = Field(default_factory=list)
-    max_turns: int | None = None
     notes: str | None = None  # authoring annotation; ignored by runtime
     example: str | None = None
     knowledge: FlowKnowledge | None = None
     variables: dict[str, VariableDecl] = Field(default_factory=dict)
-    routing: Routing = Field(default_factory=Routing)
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    @property
+    def is_callable(self) -> bool:
+        """A flow is callable iff at least one of its exit paths returns to
+        the caller. Entering a callable flow pushes a call frame; taking a
+        RETURN exit pops it."""
+        return any(is_return_goto(ep.goto) for ep in self.exit_paths)
 
 
 class Agent(Strict):

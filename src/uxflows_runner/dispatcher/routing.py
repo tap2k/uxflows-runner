@@ -12,13 +12,13 @@ Two phases per turn:
      certainty); among LLM picks, exactly one — `take_exit_path` OR
      `trigger_interrupt` — fires.
 
-`return_to_caller` exits are exposed as LLM-method `take_exit_path`
+`goto: "RETURN"` exits are exposed as LLM-method `take_exit_path`
 candidates — the LLM picks when to return based on conversational signals
 ("patron is satisfied", "patron clearly moved on"). Auto-firing every turn
 would pop the interrupt before the patron could ask follow-ups inside it
 (e.g. "what's on the menu?" → "tell me about the latte" → return).
 
-Per RUNNER-PLAN: scope matches against the top-of-stack flow only.
+Interrupts (`flow.type == "interrupt"`) are implicitly globally callable.
 """
 
 from __future__ import annotations
@@ -27,7 +27,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from uxflows_runner.spec.loader import LoadedSpec, applicable_interrupts
-from uxflows_runner.spec.types import ExitPath, Flow
+from uxflows_runner.spec.types import (
+    ExitPath,
+    Flow,
+    is_end_goto,
+    is_flow_goto,
+    is_return_goto,
+)
 
 from . import methods
 
@@ -39,9 +45,9 @@ class Decision:
     Exactly one of the action fields is meaningful per Decision instance.
     """
 
-    kind: str  # "stay" | "take_exit" | "trigger_interrupt" | "return_to_caller" | "end"
+    kind: str  # "stay" | "take_exit" | "trigger_interrupt" | "return" | "end"
     exit_path: ExitPath | None = None
-    target_flow_id: str | None = None  # next_flow_id for take_exit, interrupt_flow_id for trigger
+    target_flow_id: str | None = None  # flow id for take_exit; interrupt id for trigger
     source_flow: Flow | None = None  # the flow that owned the exit_path (for assigns/actions)
     interrupt_flow: Flow | None = None  # populated on trigger_interrupt
 
@@ -52,7 +58,7 @@ class RoutingPlan:
 
     `shortcut` is set when a calc/direct exit matches before the LLM call —
     the LLM still runs (we want a natural-language response) but its routing
-    output is ignored. `llm_exit_keys` and `llm_interrupt_keys` are passed
+    output is ignored. `llm_exit_paths` and `llm_interrupts` are passed
     through to the prompt_builder to materialize tool-call variants.
     """
 
@@ -67,26 +73,25 @@ def plan(
     active_flow_id: str,
     variables: dict[str, Any],
     *,
-    in_interrupt: bool,
+    has_caller: bool,
 ) -> RoutingPlan:
     """Pre-LLM phase: short-circuit on calc/direct, collect LLM candidates."""
     active = spec.flows_by_id[active_flow_id]
     plan = RoutingPlan(active_flow=active)
 
-    for ep in active.routing.exit_paths:
-        # `return_to_caller` is only meaningful inside an interrupt. Surface
-        # as an LLM-driven `take_exit_path` candidate — the LLM picks when to
-        # return based on conversational signals.
-        if ep.type == "return_to_caller":
-            if in_interrupt:
+    for ep in active.exit_paths:
+        # A RETURN exit is only meaningful when we have a frame to pop.
+        # Surface as an LLM-driven `take_exit_path` candidate — the LLM picks
+        # when to return based on conversational signals.
+        if is_return_goto(ep.goto):
+            if has_caller:
                 plan.llm_exit_paths.append(ep)
             continue
 
         condition = ep.condition
         if condition is None:
-            # Unconditional non-return exit (e.g. max_turns sad fallback).
-            # Surface as a candidate but don't auto-fire — the caller decides
-            # when to invoke max_turns auto-routing.
+            # Unconditional exit. Treated as a fallback — not auto-fired by
+            # the planner; reserved for future explicit-fallback semantics.
             continue
 
         if condition.method == "llm":
@@ -97,18 +102,14 @@ def plan(
         if methods.evaluate_condition(condition, variables, {}, llm_key=ep.id):
             if plan.shortcut is None:
                 plan.shortcut = _build_take_exit(active, ep)
-            # Don't break — we still record subsequent llm-method paths as
-            # candidates for the LLM call, in case the shortcut turns out
-            # invalid downstream. Actually, no: a calc shortcut wins, period.
-            # Stop walking.
+            # A calc shortcut wins, period. Stop walking.
             break
 
     # Collect applicable interrupts (only when not already inside one — nested
-    # interrupts are legal but per the plan we evaluate scope against
-    # top-of-stack, and a triggered interrupt's own scope is empty/global).
-    if not in_interrupt:
-        for interrupt in applicable_interrupts(spec, active_flow_id):
-            ec = interrupt.routing.entry_condition
+    # interrupts are legal but we don't auto-offer them in the same turn).
+    if not has_caller:
+        for interrupt in applicable_interrupts(spec):
+            ec = interrupt.entry_condition
             if ec is None:
                 continue  # interrupt with no entry_condition can't fire
             if ec.method == "llm":
@@ -176,29 +177,20 @@ def resolve(
     return Decision(kind="stay", source_flow=plan.active_flow)
 
 
-def force_max_turns_fallback(active_flow: Flow) -> Decision:
-    """When `max_turns` exhausts, pick the unconditional sad exit. Convention:
-    the first sad exit_path with no `condition` block. RUNNER-PLAN line 236."""
-    for ep in active_flow.routing.exit_paths:
-        if ep.type == "sad" and ep.condition is None:
-            return _build_take_exit(active_flow, ep)
-    raise RuntimeError(
-        f"flow {active_flow.id!r} hit max_turns but has no unconditional sad exit"
-    )
-
-
 def _build_take_exit(active_flow: Flow, ep: ExitPath) -> Decision:
-    if ep.type == "return_to_caller":
+    if is_return_goto(ep.goto):
         return Decision(
-            kind="return_to_caller",
+            kind="return",
             exit_path=ep,
             source_flow=active_flow,
         )
-    if ep.next_flow_id is None:
+    if is_end_goto(ep.goto):
         return Decision(kind="end", exit_path=ep, source_flow=active_flow)
+    # Otherwise: flow-id goto.
+    assert is_flow_goto(ep.goto)
     return Decision(
         kind="take_exit",
         exit_path=ep,
-        target_flow_id=ep.next_flow_id,
+        target_flow_id=ep.goto,
         source_flow=active_flow,
     )

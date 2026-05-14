@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from uxflows_runner.spec.loader import GLOBAL_SCOPE_KEY, applicable_interrupts, load_spec
+from uxflows_runner.spec.loader import applicable_interrupts, load_spec
+from uxflows_runner.spec.types import is_return_goto
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 COFFEE = REPO_ROOT / "examples" / "coffee.json"
@@ -34,20 +35,19 @@ def test_capability_index(coffee_spec):
 
 
 def test_global_interrupt_indexed(coffee_spec):
-    globals_ = coffee_spec.interrupts_by_scope[GLOBAL_SCOPE_KEY]
+    globals_ = coffee_spec.global_interrupts
     assert [f.id for f in globals_] == ["int_menu"]
-    # any active flow should see int_menu as applicable
-    for caller in ("flow_greet", "flow_coffee_order", "flow_confirm"):
-        assert "int_menu" in {f.id for f in applicable_interrupts(coffee_spec, caller)}
+    # Interrupts are implicitly globally callable.
+    assert "int_menu" in {f.id for f in applicable_interrupts(coffee_spec)}
 
 
-def test_return_to_caller_carries_condition_expression(coffee_spec):
-    """Spec authors can put a `condition.expression` on a return_to_caller
-    exit to tell the LLM when to return — same idiom as forward exits. The
-    runner surfaces it in the take_exit_path tool description."""
+def test_return_exit_carries_condition_expression(coffee_spec):
+    """Spec authors can put a `condition.expression` on a RETURN exit to tell
+    the LLM when to return — same idiom as forward exits. The runner surfaces
+    it in the take_exit_path tool description."""
     int_menu = coffee_spec.flows_by_id["int_menu"]
-    [exit_path] = int_menu.routing.exit_paths
-    assert exit_path.type == "return_to_caller"
+    [exit_path] = int_menu.exit_paths
+    assert is_return_goto(exit_path.goto)
     assert exit_path.condition is not None
     assert exit_path.condition.method == "llm"
     assert "named a drink" in exit_path.condition.expression
@@ -55,7 +55,7 @@ def test_return_to_caller_carries_condition_expression(coffee_spec):
 
 def test_greet_routing_methods(coffee_spec):
     flow_greet = coffee_spec.flows_by_id["flow_greet"]
-    methods = [ep.condition.method for ep in flow_greet.routing.exit_paths if ep.condition]
+    methods = [ep.condition.method for ep in flow_greet.exit_paths if ep.condition]
     # All three exits are llm-method now: coffee/tea routing is decided by
     # patron intent (semantic), not by a pre-set variable; walkaway too.
     assert methods == ["llm", "llm", "llm"]
@@ -63,7 +63,7 @@ def test_greet_routing_methods(coffee_spec):
 
 def test_action_capability_id_resolves(coffee_spec):
     flow_confirm = coffee_spec.flows_by_id["flow_confirm"]
-    placed = next(ep for ep in flow_confirm.routing.exit_paths if ep.id == "xp_cf_placed")
+    placed = next(ep for ep in flow_confirm.exit_paths if ep.id == "xp_cf_placed")
     assert placed.actions[0].capability_id == "cap_place_order"
     cap = coffee_spec.capabilities_by_id[placed.actions[0].capability_id]
     assert cap.name == "place_order"
@@ -71,6 +71,6 @@ def test_action_capability_id_resolves(coffee_spec):
 
 def test_assigns_direct(coffee_spec):
     flow_confirm = coffee_spec.flows_by_id["flow_confirm"]
-    placed = next(ep for ep in flow_confirm.routing.exit_paths if ep.id == "xp_cf_placed")
+    placed = next(ep for ep in flow_confirm.exit_paths if ep.id == "xp_cf_placed")
     assert placed.assigns["order_status"].method == "direct"
     assert placed.assigns["order_status"].value == "confirmed"

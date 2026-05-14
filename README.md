@@ -7,7 +7,7 @@ Plan and rationale: [RUNNER-PLAN.md](./RUNNER-PLAN.md). Strategy: [../whatsupp2/
 ## Status
 
 - **Phase 0** ✅ — bare audio loop end-to-end (Pipecat WebRTC + Google STT/LLM/TTS).
-- **Phase 1** ✅ — v0 dispatcher: spec-driven flow interpretation, three-method routing (`direct` / `calculation` / `llm`), interrupts with `return_to_caller`, post-exit assigns + capability dispatch, event emission.
+- **Phase 1** ✅ — v0 dispatcher: spec-driven flow interpretation, three-method routing (`direct` / `calculation` / `llm`), interrupts with `goto: "RETURN"`, post-exit assigns + capability dispatch, event emission.
 - **Phase 1.5** ✅ — text I/O adapter: `/api/chat/{session,turn,end}` endpoints, BYOK or env-fallback auth, `context_vars` for placeholder substitution + initial variable seeding.
 - **Phase 2 (text path)** ✅ — editor canvas highlighting from event stream. `FlowNode` rings the active flow; edges pulse on `exit_path_taken`; variables stream into the simulate panel. Wired through HTTP (Phase 1.5's `/api/chat/*`), not SSE. Voice-mode → editor integration (SSE broker, `/api/offer` event subscription) deferred until a voice consumer needs it.
 - **Session event log persistence** ✅ — set `UXFLOWS_EVENT_LOG_DIR` and every session writes a `{session_id}.jsonl` file alongside the live emitter. Per-session file = one file replay. Voice + text both honor it.

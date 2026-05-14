@@ -41,7 +41,7 @@ class SessionEnded(_Base):
 class FlowEntered(_Base):
     type: Literal["flow_entered"] = "flow_entered"
     flow_id: str
-    via: Literal["transition", "interrupt", "return_to_caller", "entry"]
+    via: Literal["transition", "interrupt", "return", "entry"]
     caller_flow_id: str | None = None
 
 
@@ -49,7 +49,7 @@ class FlowExited(_Base):
     type: Literal["flow_exited"] = "flow_exited"
     flow_id: str
     exit_path_id: str | None = None
-    reason: Literal["transition", "terminal", "interrupted", "returned_to_caller"]
+    reason: Literal["transition", "terminal", "interrupted", "returned"]
 
 
 class ExitPathTaken(_Base):

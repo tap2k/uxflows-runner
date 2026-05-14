@@ -217,7 +217,7 @@ class TextSession:
         # mutation it already applied.
         self._append_tool_result(first_call["id"], first_call["name"])
 
-        if decision is not None and decision.kind in ("trigger_interrupt", "return_to_caller"):
+        if decision is not None and decision.kind in ("trigger_interrupt", "return"):
             # Voice path pushes LLMRunFrame; text mode just calls inference
             # again. plan_for_active_flow already ran inside apply_tool_call,
             # so the new flow's prompt + tools are loaded.

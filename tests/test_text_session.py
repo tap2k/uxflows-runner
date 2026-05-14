@@ -428,10 +428,10 @@ async def test_interrupt_then_return_via_take_exit_path(coffee_spec, monkeypatch
     """Regression: trigger int_menu, take a follow-up turn inside it, then
     return via take_exit_path picking xp_int_menu_return.
 
-    Pre-fix: return_to_caller exits sat on plan.shortcut and were dropped
-    when the LLM produced text-only — patron stayed in int_menu forever.
-    Post-fix: the return path is an LLM-driven take_exit_path candidate;
-    the LLM picks it when ready.
+    Pre-fix: RETURN exits sat on plan.shortcut and were dropped when the LLM
+    produced text-only — patron stayed in int_menu forever. Post-fix: the
+    return path is an LLM-driven take_exit_path candidate; the LLM picks it
+    when ready.
     """
     script = [
         # Opening
@@ -464,22 +464,22 @@ async def test_interrupt_then_return_via_take_exit_path(coffee_spec, monkeypatch
     reply = await ts.turn("what do you have?")
     assert reply == "What sounds good?"
     assert ts.session.state.active_flow_id == "int_menu"
-    assert ts.session.state.is_in_interrupt
+    assert ts.session.state.has_caller
     ts.drain_events()
 
     # Multi-turn inside the interrupt — should NOT auto-return on plain text
     reply = await ts.turn("what's a latte?")
     assert reply == "Latte's espresso with steamed milk — popular pick. Want one?"
     assert ts.session.state.active_flow_id == "int_menu"
-    assert ts.session.state.is_in_interrupt
+    assert ts.session.state.has_caller
     ts.drain_events()
 
     # LLM picks the return path → pop back to flow_greet, follow-up inference fires
     reply = await ts.turn("I'll have coffee")
     assert reply == "What size would you like?"
     assert ts.session.state.active_flow_id == "flow_greet"
-    assert not ts.session.state.is_in_interrupt
+    assert not ts.session.state.has_caller
 
     events = ts.drain_events()
     fes = [e for e in events if isinstance(e, FlowEntered)]
-    assert any(e.flow_id == "flow_greet" and e.via == "return_to_caller" for e in fes)
+    assert any(e.flow_id == "flow_greet" and e.via == "return" for e in fes)

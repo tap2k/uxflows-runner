@@ -3,12 +3,17 @@
 System prompt (RUNNER-PLAN §"v0 dispatcher feature scope"):
   agent.system_prompt
   + agent.guardrails (Operating principles)
-  + agent.knowledge.faq (Frequently asked, with per-language scripts when present)
+  + agent.knowledge.faq (Frequently asked)
   + agent.knowledge.glossary (Terminology)
   + flow.instructions (This flow)
   + flow.guardrails
   + flow.knowledge.faq
-  + flow.scripts[lang] (sample lines)
+  + flow.scripts (sample lines for the active language)
+
+Translatable fields (`system_prompt`, `guardrail.statement`, `faq.answer`,
+`glossary.definition`, `flow.instructions`, `script.text`) are all
+LocalizedString — resolved through `resolve_localized` against the session's
+active language with fallback to the agent's default language.
 
 Tool schema (RUNNER-PLAN §"Gemini tool-call shape"):
   - One `take_exit_path` FunctionSchema with an `exit_path_id` parameter
@@ -30,7 +35,15 @@ from typing import Any
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 
-from uxflows_runner.spec.types import Agent, ExitPath, Flow
+from uxflows_runner.spec.types import (
+    Agent,
+    ExitPath,
+    Flow,
+    LocalizedString,
+    default_language,
+    is_return_goto,
+    resolve_localized,
+)
 
 from .routing import RoutingPlan
 
@@ -61,60 +74,86 @@ def substitute_variables(text: str, variables: dict[str, Any] | None) -> str:
     return _PLACEHOLDER.sub(_replace, text)
 
 
+def _resolve(value: LocalizedString | None, lang: str | None, default_lang: str) -> str:
+    return resolve_localized(value, lang, default_lang)
+
+
 def build_system_prompt(
     agent: Agent,
     flow: Flow,
     lang: str | None,
     variables: dict[str, Any] | None = None,
 ) -> str:
-    """`lang=None` means "all languages" — emit every script bucket and every
-    per-language FAQ override. A concrete code filters to just that bucket."""
+    """`lang=None` means "use the agent's default language" — translatable
+    fields resolve to the default-language string."""
+    default_lang = default_language(agent.meta.languages)
     sections: list[str] = []
-    if agent.system_prompt:
-        sections.append(agent.system_prompt.strip())
+
+    sp = _resolve(agent.system_prompt, lang, default_lang)
+    if sp:
+        sections.append(sp.strip())
 
     if agent.guardrails:
         sections.append(
             "Operating principles:\n"
-            + "\n".join(f"- {g.statement}" for g in agent.guardrails)
+            + "\n".join(
+                f"- {_resolve(g.statement, lang, default_lang)}"
+                for g in agent.guardrails
+            )
         )
 
     if agent.knowledge.faq:
-        sections.append("Frequently asked:\n" + _format_faq(agent.knowledge.faq, lang))
+        sections.append(
+            "Frequently asked:\n" + _format_faq(agent.knowledge.faq, lang, default_lang)
+        )
 
     if agent.knowledge.glossary:
         sections.append(
             "Terminology:\n"
-            + "\n".join(f"- {g.term}: {g.definition}" for g in agent.knowledge.glossary)
+            + "\n".join(
+                f"- {g.term}: {_resolve(g.definition, lang, default_lang)}"
+                for g in agent.knowledge.glossary
+            )
         )
 
     sections.append(f"This flow ({flow.id}):")
-    if flow.instructions:
-        sections.append(flow.instructions.strip())
+    instr = _resolve(flow.instructions, lang, default_lang)
+    if instr:
+        sections.append(instr.strip())
 
     if flow.guardrails:
         sections.append(
             "For this flow specifically:\n"
-            + "\n".join(f"- {g.statement}" for g in flow.guardrails)
+            + "\n".join(
+                f"- {_resolve(g.statement, lang, default_lang)}"
+                for g in flow.guardrails
+            )
         )
 
     if flow.knowledge and flow.knowledge.faq:
-        sections.append("Flow-specific FAQ:\n" + _format_faq(flow.knowledge.faq, lang))
+        sections.append(
+            "Flow-specific FAQ:\n" + _format_faq(flow.knowledge.faq, lang, default_lang)
+        )
 
-    # When lang is set, emit only that bucket. When None, emit every bucket
-    # the flow has — useful for inspection and multilingual prompt previews.
-    script_langs = [lang] if lang else list(flow.scripts.keys())
+    # Per-flow scripts. Each line has a LocalizedString text and optional
+    # per-language variations. Resolve against the active language.
     bucket_lines: list[str] = []
-    for code in script_langs:
-        scripts = flow.scripts.get(code) or []
-        if not scripts:
+    for s in flow.scripts:
+        text = _resolve(s.text, lang, default_lang)
+        if not text:
             continue
-        bucket_lines.append(f"({code})")
-        for s in scripts:
-            bucket_lines.append(f"- [{s.id}] {s.text}")
-            for v in s.variations:
-                if v:
-                    bucket_lines.append(f"  | {v}")
+        bucket_lines.append(f"- [{s.id}] {text}")
+        variations_for_lang: list[str] = []
+        if s.variations:
+            effective = lang or default_lang
+            variations_for_lang = (
+                s.variations.get(effective)
+                or s.variations.get(default_lang)
+                or []
+            )
+        for v in variations_for_lang:
+            if v:
+                bucket_lines.append(f"  | {v}")
     if bucket_lines:
         sections.append(
             "Scripted lines — when instructions reference a script by [id], "
@@ -227,7 +266,7 @@ def _exit_path_intent(ep: ExitPath) -> str:
     """
     if ep.condition is not None:
         return ep.condition.expression
-    if ep.type == "return_to_caller":
+    if is_return_goto(ep.goto):
         return (
             "Return to the previous flow when this side conversation is "
             "naturally complete and the patron is ready to move on."
@@ -238,10 +277,10 @@ def _exit_path_intent(ep: ExitPath) -> str:
 def _interrupt_intent(f: Flow) -> str:
     """One-line intent text for an interrupt's trigger_interrupt entry, with
     the same precedence as exits: entry_condition.expression wins; fall back
-    to flow.description, then flow.id."""
-    if f.routing.entry_condition is not None:
-        return f.routing.entry_condition.expression
-    return f.description or f.id
+    to flow.name, then flow.id."""
+    if f.entry_condition is not None:
+        return f.entry_condition.expression
+    return f.name or f.id
 
 
 def _trigger_interrupt_schema(
@@ -271,18 +310,11 @@ def _trigger_interrupt_schema(
     )
 
 
-def _format_faq(entries, lang: str | None) -> str:
+def _format_faq(entries, lang: str | None, default_lang: str) -> str:
+    """FAQ entries are { id, question, answer: LocalizedString }. Resolve
+    answer against the active language."""
     lines = []
     for entry in entries:
-        if lang:
-            # Single-language session: per-language script overrides the base.
-            answer = entry.scripts.get(lang) if entry.scripts else None
-            lines.append(f"- Q: {entry.question}\n  A: {answer or entry.answer}")
-        else:
-            # No language picked: surface the canonical answer plus every
-            # per-language variant the entry has.
-            lines.append(f"- Q: {entry.question}\n  A: {entry.answer}")
-            for code, text in (entry.scripts or {}).items():
-                if text:
-                    lines.append(f"  Say ({code}): {text}")
+        answer = _resolve(entry.answer, lang, default_lang)
+        lines.append(f"- Q: {entry.question}\n  A: {answer}")
     return "\n".join(lines)

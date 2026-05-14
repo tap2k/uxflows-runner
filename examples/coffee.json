@@ -119,32 +119,39 @@
     "knowledge": {
       "faq": [
         {
+          "id": "faq_0",
           "question": "Do you have decaf?",
           "answer": "Yes — we can swap any espresso drink to decaf at no charge."
         },
         {
+          "id": "faq_1",
           "question": "What hours are you open?",
           "answer": "Seven days a week, 6am to 6pm."
         },
         {
+          "id": "faq_2",
           "question": "Do you have wifi?",
           "answer": "Yes, free wifi — ask the barista at the bar for the password."
         },
         {
+          "id": "faq_3",
           "question": "Are you dog friendly?",
           "answer": "Patio is dog friendly; inside seating is people only."
         }
       ],
       "glossary": [
         {
+          "id": "gloss_0",
           "term": "Drip",
           "definition": "Filter-brewed black coffee from the day's batch."
         },
         {
+          "id": "gloss_1",
           "term": "Americano",
           "definition": "Espresso shots topped with hot water — drip-strength but espresso-flavored."
         },
         {
+          "id": "gloss_2",
           "term": "Latte",
           "definition": "Espresso with steamed milk and a thin layer of microfoam."
         }
@@ -180,38 +187,38 @@
             {
               "drink_type": "coffee",
               "drink_style": "drip",
-              "price_small": 3.00,
-              "price_large": 4.00
+              "price_small": 3,
+              "price_large": 4
             },
             {
               "drink_type": "coffee",
               "drink_style": "americano",
-              "price_small": 3.50,
-              "price_large": 4.50
+              "price_small": 3.5,
+              "price_large": 4.5
             },
             {
               "drink_type": "coffee",
               "drink_style": "latte",
-              "price_small": 4.50,
-              "price_large": 5.50
+              "price_small": 4.5,
+              "price_large": 5.5
             },
             {
               "drink_type": "tea",
               "drink_style": "black",
-              "price_small": 3.00,
-              "price_large": 4.00
+              "price_small": 3,
+              "price_large": 4
             },
             {
               "drink_type": "tea",
               "drink_style": "green",
-              "price_small": 3.00,
-              "price_large": 4.00
+              "price_small": 3,
+              "price_large": 4
             },
             {
               "drink_type": "tea",
               "drink_style": "herbal",
-              "price_small": 3.50,
-              "price_large": 4.50
+              "price_small": 3.5,
+              "price_large": 4.5
             }
           ]
         }
@@ -225,303 +232,265 @@
       "id": "flow_greet",
       "version": "0.1.0",
       "name": "Greet & route",
-      "description": "Welcome the patron and figure out whether they're ordering a coffee or a tea. Self-contained: scripts reference no pre-populated variables.",
       "type": "happy",
       "instructions": "Open warmly. Ask the patron what they'd like today. From their reply, determine drink_type (coffee or tea). Once a category is clear, move on — drink-style (drip / americano / latte) is the next flow's job, not yours. Only ask a clarifier when the reply is genuinely ambiguous (e.g. 'something warm'). Patrons asking for anything off-menu (pastries, food, smoothies): say we don't carry that and offer coffee or tea.",
-      "scripts": {
-        "en-US": [
-          {
-            "id": "gr_s1",
-            "text": "Hi, welcome to Bluebird! What can I get started for you today?"
+      "scripts": [
+        {
+          "id": "gr_s1",
+          "text": "Hi, welcome to Bluebird! What can I get started for you today?"
+        },
+        {
+          "id": "gr_s2",
+          "text": "Coffee or tea?"
+        }
+      ],
+      "exit_paths": [
+        {
+          "id": "xp_greet_to_coffee",
+          "condition": {
+            "expression": "Patron has indicated they want a coffee drink (drip, americano, latte, espresso, or any coffee-style beverage).",
+            "method": "llm"
           },
-          {
-            "id": "gr_s2",
-            "text": "Coffee or tea?"
-          }
-        ]
-      },
-      "routing": {
-        "exit_paths": [
-          {
-            "id": "xp_greet_to_coffee",
-            "type": "happy",
-            "condition": {
-              "expression": "Patron has indicated they want a coffee drink (drip, americano, latte, espresso, or any coffee-style beverage).",
-              "method": "llm"
-            },
-            "next_flow_id": "flow_coffee_order",
-            "assigns": {
-              "drink_type": {
-                "method": "direct",
-                "value": "coffee"
-              }
+          "assigns": {
+            "drink_type": {
+              "method": "direct",
+              "value": "coffee"
             }
           },
-          {
-            "id": "xp_greet_to_tea",
-            "type": "happy",
-            "condition": {
-              "expression": "Patron has indicated they want tea (black, green, herbal, or any tea variety).",
-              "method": "llm"
-            },
-            "next_flow_id": "flow_tea_order",
-            "assigns": {
-              "drink_type": {
-                "method": "direct",
-                "value": "tea"
-              }
+          "goto": "flow_coffee_order"
+        },
+        {
+          "id": "xp_greet_to_tea",
+          "condition": {
+            "expression": "Patron has indicated they want tea (black, green, herbal, or any tea variety).",
+            "method": "llm"
+          },
+          "assigns": {
+            "drink_type": {
+              "method": "direct",
+              "value": "tea"
             }
           },
-          {
-            "id": "xp_greet_walkaway",
-            "type": "sad",
-            "condition": {
-              "expression": "Patron is not ordering anything, asked to leave, or repeatedly cannot decide between coffee and tea.",
-              "method": "llm"
-            },
-            "next_flow_id": null,
-            "actions": [
-              {
-                "capability_id": "cap_log_walkaway"
-              }
-            ]
-          }
-        ]
-      }
+          "goto": "flow_tea_order"
+        },
+        {
+          "id": "xp_greet_walkaway",
+          "condition": {
+            "expression": "Patron is not ordering anything, asked to leave, or repeatedly cannot decide between coffee and tea.",
+            "method": "llm"
+          },
+          "actions": [
+            {
+              "capability_id": "cap_log_walkaway"
+            }
+          ],
+          "goto": "END"
+        }
+      ]
     },
     {
       "$schema": "UX4://flow/v0",
       "id": "flow_coffee_order",
       "version": "0.1.0",
       "name": "Coffee order",
-      "description": "Take a coffee order: drink style (drip / americano / latte), size, milk, syrup. If size is large and milk isn't oat, mention oat pairs well — once, casually.",
       "type": "happy",
       "instructions": "Capture drink_style (drip / americano / latte), size (small / medium / large), milk (regular / oat / almond / soy / none), and syrup (vanilla / caramel / hazelnut / none). Don't ask for milk on a black drip unless the patron mentions it. If size is large and milk is not oat, casually mention oat milk pairs nicely with a large — once, not twice; the patron can decline. When you have all four slots, move to confirmation.",
-      "scripts": {
-        "en-US": [
-          {
-            "id": "co_s1",
-            "text": "Coffee — got it. Drip, americano, or latte?"
-          },
-          {
-            "id": "co_s2",
-            "text": "What size — small, medium, or large?"
-          },
-          {
-            "id": "co_s3",
-            "text": "Any milk preference? Oat, almond, soy, or regular."
-          },
-          {
-            "id": "co_s4",
-            "text": "Any syrup with that — vanilla, caramel, hazelnut, or skip it?"
-          },
-          {
-            "id": "co_s5",
-            "text": "Quick heads up — oat milk pairs really well with a large. Want to swap?"
-          }
-        ]
-      },
-      "routing": {
-        "entry_condition": {
-          "expression": "drink_type == \"coffee\"",
-          "method": "calculation"
+      "scripts": [
+        {
+          "id": "co_s1",
+          "text": "Coffee — got it. Drip, americano, or latte?"
         },
-        "exit_paths": [
-          {
-            "id": "xp_co_to_confirm",
-            "type": "happy",
-            "condition": {
-              "expression": "Patron has provided drink style, size, milk, and syrup choice (or explicitly skipped syrup).",
-              "method": "llm"
-            },
-            "next_flow_id": "flow_confirm"
+        {
+          "id": "co_s2",
+          "text": "What size — small, medium, or large?"
+        },
+        {
+          "id": "co_s3",
+          "text": "Any milk preference? Oat, almond, soy, or regular."
+        },
+        {
+          "id": "co_s4",
+          "text": "Any syrup with that — vanilla, caramel, hazelnut, or skip it?"
+        },
+        {
+          "id": "co_s5",
+          "text": "Quick heads up — oat milk pairs really well with a large. Want to swap?"
+        }
+      ],
+      "entry_condition": {
+        "expression": "drink_type == \"coffee\"",
+        "method": "calculation"
+      },
+      "exit_paths": [
+        {
+          "id": "xp_co_to_confirm",
+          "condition": {
+            "expression": "Patron has provided drink style, size, milk, and syrup choice (or explicitly skipped syrup).",
+            "method": "llm"
           },
-          {
-            "id": "xp_co_cancel",
-            "type": "sad",
-            "condition": {
-              "expression": "Patron changed their mind, asked to cancel, or wants to leave.",
-              "method": "llm"
-            },
-            "next_flow_id": null,
-            "actions": [
-              {
-                "capability_id": "cap_log_walkaway"
-              }
-            ]
-          }
-        ]
-      }
+          "goto": "flow_confirm"
+        },
+        {
+          "id": "xp_co_cancel",
+          "condition": {
+            "expression": "Patron changed their mind, asked to cancel, or wants to leave.",
+            "method": "llm"
+          },
+          "actions": [
+            {
+              "capability_id": "cap_log_walkaway"
+            }
+          ],
+          "goto": "END"
+        }
+      ]
     },
     {
       "$schema": "UX4://flow/v0",
       "id": "flow_tea_order",
       "version": "0.1.0",
       "name": "Tea order",
-      "description": "Take a tea order: tea style (black / green / herbal), size, honey or no.",
       "type": "happy",
       "instructions": "Capture drink_style (black / green / herbal), size (small / medium / large), and honey (true if the patron wants honey, false if not). Move to confirmation when all three are set.",
-      "scripts": {
-        "en-US": [
-          {
-            "id": "te_s1",
-            "text": "Tea — nice. Black, green, or herbal?"
-          },
-          {
-            "id": "te_s2",
-            "text": "Small, medium, or large?"
-          },
-          {
-            "id": "te_s3",
-            "text": "Honey?"
-          }
-        ]
-      },
-      "routing": {
-        "entry_condition": {
-          "expression": "drink_type == \"tea\"",
-          "method": "calculation"
+      "scripts": [
+        {
+          "id": "te_s1",
+          "text": "Tea — nice. Black, green, or herbal?"
         },
-        "exit_paths": [
-          {
-            "id": "xp_te_to_confirm",
-            "type": "happy",
-            "condition": {
-              "expression": "Patron has provided tea style, size, and answered the honey question.",
-              "method": "llm"
-            },
-            "next_flow_id": "flow_confirm"
+        {
+          "id": "te_s2",
+          "text": "Small, medium, or large?"
+        },
+        {
+          "id": "te_s3",
+          "text": "Honey?"
+        }
+      ],
+      "entry_condition": {
+        "expression": "drink_type == \"tea\"",
+        "method": "calculation"
+      },
+      "exit_paths": [
+        {
+          "id": "xp_te_to_confirm",
+          "condition": {
+            "expression": "Patron has provided tea style, size, and answered the honey question.",
+            "method": "llm"
           },
-          {
-            "id": "xp_te_cancel",
-            "type": "sad",
-            "condition": {
-              "expression": "Patron changed their mind, asked to cancel, or wants to leave.",
-              "method": "llm"
-            },
-            "next_flow_id": null,
-            "actions": [
-              {
-                "capability_id": "cap_log_walkaway"
-              }
-            ]
-          }
-        ]
-      }
+          "goto": "flow_confirm"
+        },
+        {
+          "id": "xp_te_cancel",
+          "condition": {
+            "expression": "Patron changed their mind, asked to cancel, or wants to leave.",
+            "method": "llm"
+          },
+          "actions": [
+            {
+              "capability_id": "cap_log_walkaway"
+            }
+          ],
+          "goto": "END"
+        }
+      ]
     },
     {
       "$schema": "UX4://flow/v0",
       "id": "flow_confirm",
       "version": "0.1.0",
       "name": "Confirm & place",
-      "description": "Recap the assembled order, get an explicit yes, fire place_order. On cancel, log a walkaway. Mid-recap slot edits are absorbed in this flow — re-update the slot and re-recap, no flow transition.",
       "type": "happy",
       "instructions": "Recap the full order in one sentence, including size, drink_style, and customizations (milk + syrup for coffee; honey y/n for tea). Skip 'none' fields naturally — say 'no syrup' rather than 'syrup: none'. Ask 'sound right?' and wait for an explicit yes/no. On yes, place the order. If the patron wants to change a slot ('actually make it oat milk', 'medium not large'), update the slot in place and re-recap — stay in this flow. On cancel or walkaway, log it.",
-      "scripts": {
-        "en-US": [
-          {
-            "id": "cf_s1",
-            "text": "Alright — that's a {size} {drink_style} with {milk} milk and {syrup} syrup. Sound right?"
+      "scripts": [
+        {
+          "id": "cf_s1",
+          "text": "Alright — that's a {size} {drink_style} with {milk} milk and {syrup} syrup. Sound right?"
+        },
+        {
+          "id": "cf_s2",
+          "text": "Alright — a {size} {drink_style} tea. Sound right?"
+        },
+        {
+          "id": "cf_s3",
+          "text": "Order's in. Should be ready in a couple minutes — thanks!"
+        },
+        {
+          "id": "cf_s4",
+          "text": "No worries — what would you like to change?"
+        },
+        {
+          "id": "cf_s5",
+          "text": "All good — have a nice day!"
+        }
+      ],
+      "exit_paths": [
+        {
+          "id": "xp_cf_placed",
+          "condition": {
+            "expression": "Patron confirmed the recap is correct.",
+            "method": "llm"
           },
-          {
-            "id": "cf_s2",
-            "text": "Alright — a {size} {drink_style} tea. Sound right?"
+          "assigns": {
+            "order_status": {
+              "method": "direct",
+              "value": "confirmed"
+            }
           },
-          {
-            "id": "cf_s3",
-            "text": "Order's in. Should be ready in a couple minutes — thanks!"
+          "actions": [
+            {
+              "capability_id": "cap_place_order"
+            }
+          ],
+          "goto": "END"
+        },
+        {
+          "id": "xp_cf_cancel",
+          "condition": {
+            "expression": "Patron asked to cancel the order or walk away.",
+            "method": "llm"
           },
-          {
-            "id": "cf_s4",
-            "text": "No worries — what would you like to change?"
+          "assigns": {
+            "order_status": {
+              "method": "direct",
+              "value": "cancelled"
+            }
           },
-          {
-            "id": "cf_s5",
-            "text": "All good — have a nice day!"
-          }
-        ]
-      },
-      "routing": {
-        "exit_paths": [
-          {
-            "id": "xp_cf_placed",
-            "type": "happy",
-            "condition": {
-              "expression": "Patron confirmed the recap is correct.",
-              "method": "llm"
-            },
-            "next_flow_id": null,
-            "assigns": {
-              "order_status": {
-                "method": "direct",
-                "value": "confirmed"
-              }
-            },
-            "actions": [
-              {
-                "capability_id": "cap_place_order"
-              }
-            ]
-          },
-          {
-            "id": "xp_cf_cancel",
-            "type": "sad",
-            "condition": {
-              "expression": "Patron asked to cancel the order or walk away.",
-              "method": "llm"
-            },
-            "next_flow_id": null,
-            "assigns": {
-              "order_status": {
-                "method": "direct",
-                "value": "cancelled"
-              }
-            },
-            "actions": [
-              {
-                "capability_id": "cap_log_walkaway"
-              }
-            ]
-          }
-        ]
-      }
+          "actions": [
+            {
+              "capability_id": "cap_log_walkaway"
+            }
+          ],
+          "goto": "END"
+        }
+      ]
     },
     {
       "$schema": "UX4://flow/v0",
       "id": "int_menu",
       "version": "0.1.0",
       "name": "Interrupt — what's on the menu",
-      "description": "Patron asks what's on the menu, what's good, or what the options are. Restate the short menu and return to caller.",
       "type": "interrupt",
-      "scope": [
-        "global"
-      ],
       "instructions": "Give a quick one-sentence rundown of the menu — drip/americano/latte for coffee; black/green/herbal tea; small/medium/large. Don't list prices unless asked.",
-      "scripts": {
-        "en-US": [
-          {
-            "id": "int_menu_s1",
-            "text": "We've got drip, americano, and latte on the coffee side, and black, green, or herbal tea — all small, medium, or large. What sounds good?"
-          }
-        ]
+      "scripts": [
+        {
+          "id": "int_menu_s1",
+          "text": "We've got drip, americano, and latte on the coffee side, and black, green, or herbal tea — all small, medium, or large. What sounds good?"
+        }
+      ],
+      "entry_condition": {
+        "expression": "Patron asks what's on the menu, what the options are, or what's good.",
+        "method": "llm"
       },
-      "routing": {
-        "entry_condition": {
-          "expression": "Patron asks what's on the menu, what the options are, or what's good.",
-          "method": "llm"
-        },
-        "exit_paths": [
-          {
-            "id": "xp_int_menu_return",
-            "type": "return_to_caller",
-            "next_flow_id": null,
-            "condition": {
-              "expression": "Patron has heard the menu and either named a drink, asked one quick follow-up, or moved on.",
-              "method": "llm"
-            }
-          }
-        ]
-      }
+      "exit_paths": [
+        {
+          "id": "xp_int_menu_return",
+          "condition": {
+            "expression": "Patron has heard the menu and either named a drink, asked one quick follow-up, or moved on.",
+            "method": "llm"
+          },
+          "goto": "RETURN"
+        }
+      ]
     }
   ]
 }

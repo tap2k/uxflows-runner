@@ -21,7 +21,7 @@ def coffee():
 
 def test_direct_assign_fires(coffee):
     flow_confirm = coffee.flows_by_id["flow_confirm"]
-    placed = next(ep for ep in flow_confirm.routing.exit_paths if ep.id == "xp_cf_placed")
+    placed = next(ep for ep in flow_confirm.exit_paths if ep.id == "xp_cf_placed")
     bag = {"drink_type": "coffee"}
     results = assigns.fire(placed, bag, llm_results={})
     assert bag["order_status"] == "confirmed"
@@ -38,9 +38,8 @@ def test_llm_assign_pulls_from_take_exit_args():
     from the take_exit_path tool args."""
     ep = ExitPath(
         id="xp_x",
-        type="happy",
+        goto="flow_next",
         condition=None,
-        next_flow_id="flow_next",
         assigns={
             "drink_style": Assign(method="llm", value=None),
             "size": Assign(method="llm", value=None),
@@ -60,9 +59,8 @@ def test_llm_assign_pulls_from_take_exit_args():
 def test_llm_assign_missing_value_skipped():
     ep = ExitPath(
         id="xp_x",
-        type="happy",
+        goto="flow_next",
         condition=None,
-        next_flow_id="flow_next",
         assigns={"drink_style": Assign(method="llm", value=None)},
     )
     bag: dict = {}
@@ -75,9 +73,8 @@ def test_llm_assign_missing_value_skipped():
 def test_calculation_assign_evaluates():
     ep = ExitPath(
         id="xp_x",
-        type="happy",
+        goto="flow_next",
         condition=None,
-        next_flow_id="flow_next",
         assigns={"big_loan": Assign(method="calculation", value="loan_amount > 50000")},
     )
     bag = {"loan_amount": 75000}

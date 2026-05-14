@@ -27,9 +27,9 @@ Two FrameProcessors and two LLM tool handlers, all closing over a shared
   PostLLMResolver — sits after the LLM (and TTS, before transport.output).
     On LLMFullResponseEndFrame:
       - if tool_handler_fired_this_turn: no-op
-      - else: increment_turn(); check max_turns; on exhaustion, run the
-        unconditional sad fallback synthetically (re-uses the take_exit
-        code path).
+      - else: increment_turn() and stay. (Per-frame turn counter remains
+        for observability and a future reserved-variable primitive; see
+        SCHEMA.md Open Questions for the "turn budgets" design.)
 """
 
 from __future__ import annotations
@@ -142,7 +142,7 @@ def plan_for_active_flow(s: Session) -> None:
         s.spec,
         s.state.active_flow_id,
         s.state.variables,
-        in_interrupt=s.state.is_in_interrupt,
+        has_caller=s.state.has_caller,
     )
     s.current_plan = plan
     tools = build_tools(plan, s.state.variables)
@@ -187,7 +187,7 @@ def register_dispatcher_tools(llm: LLMService, session: Session) -> None:
         )
         if decision is None:
             return
-        if decision.kind in ("trigger_interrupt", "return_to_caller"):
+        if decision.kind in ("trigger_interrupt", "return"):
             await params.llm.push_frame(LLMRunFrame())
             return
         # Silent-take_exit follow-up: Gemini sometimes emits the tool call
@@ -210,7 +210,7 @@ def register_dispatcher_tools(llm: LLMService, session: Session) -> None:
         await params.result_callback(
             {}, properties=FunctionCallResultProperties(run_llm=False)
         )
-        if decision is not None and decision.kind in ("trigger_interrupt", "return_to_caller"):
+        if decision is not None and decision.kind in ("trigger_interrupt", "return"):
             await params.llm.push_frame(LLMRunFrame())
 
     llm.register_function("take_exit_path", _take_exit_path)
@@ -225,7 +225,7 @@ async def apply_tool_call(
     and re-plan the active flow if a transition happened.
 
     Returns the Decision so the caller can decide whether a follow-up LLM
-    inference is needed. `trigger_interrupt` and `return_to_caller` need one
+    inference is needed. `trigger_interrupt` and `return` need one
     (Gemini AUTO mode reliably emits text + tool together on `take_exit_path`,
     but tends to emit ONLY the function call on interrupts — silence to the
     patron. We tried prompt + tool-description mandates; they don't reliably
@@ -252,7 +252,7 @@ async def apply_tool_call(
     decision = routing_mod.resolve(s.current_plan, s.spec, llm_results)
     await _apply_decision(decision, s, llm_results=llm_results)
 
-    if decision.kind in ("trigger_interrupt", "return_to_caller"):
+    if decision.kind in ("trigger_interrupt", "return"):
         # Re-plan for the new active flow before its first turn fires.
         plan_for_active_flow(s)
 
@@ -265,8 +265,8 @@ async def _apply_decision(
     llm_results: dict[str, Any] | None = None,
 ) -> None:
     """Branch on Decision.kind and execute. `llm_results` is None when called
-    synthetically from the PostLLMResolver backstop (max_turns fallback) —
-    in that path llm-method assigns are unresolvable and get skipped."""
+    synthetically (no LLM turn produced the decision); in that path llm-method
+    assigns are unresolvable and get skipped."""
     llm_results = llm_results or {}
 
     if decision.kind == "stay":
@@ -276,8 +276,8 @@ async def _apply_decision(
         await _do_trigger_interrupt(s, decision)
         return
 
-    if decision.kind == "return_to_caller":
-        await _do_return_to_caller(s, decision)
+    if decision.kind == "return":
+        await _do_return(s, decision)
         return
 
     if decision.kind in ("take_exit", "end"):
@@ -350,7 +350,7 @@ async def _do_take_exit(
         s.ended = True
         return
 
-    # take_exit (transition or return_to_caller routed via direct take_exit)
+    # take_exit — transition into a flow.
     s.events.emit(
         FlowExited(
             session_id=s.session_id,
@@ -359,7 +359,16 @@ async def _do_take_exit(
             reason="transition",
         )
     )
-    new_frame = s.state.transition(decision.target_flow_id)  # type: ignore[arg-type]
+    target_id = decision.target_flow_id
+    assert target_id is not None
+    target_flow = s.spec.flows_by_id[target_id]
+    # Callable destinations push a frame; non-callable transitions replace
+    # the active frame in place. Schema derives callability from structure:
+    # a flow is callable iff it has at least one `goto: "RETURN"` exit.
+    if target_flow.is_callable:
+        new_frame = s.state.push_call(target_id)
+    else:
+        new_frame = s.state.transition(target_id)
     new_flow = s.spec.flows_by_id[new_frame.flow_id]
     s.events.emit(
         FlowEntered(
@@ -378,7 +387,7 @@ async def _do_trigger_interrupt(s: Session, decision: routing_mod.Decision) -> N
     assert interrupt is not None and source is not None
 
     # entry_condition method for events
-    ec = interrupt.routing.entry_condition
+    ec = interrupt.entry_condition
     method = ec.method if ec is not None else "direct"
 
     s.events.emit(
@@ -389,7 +398,7 @@ async def _do_trigger_interrupt(s: Session, decision: routing_mod.Decision) -> N
             method=method,  # type: ignore[arg-type]
         )
     )
-    new_frame = s.state.push_interrupt(interrupt.id)
+    new_frame = s.state.push_call(interrupt.id)
     s.events.emit(
         FlowEntered(
             session_id=s.session_id,
@@ -401,16 +410,35 @@ async def _do_trigger_interrupt(s: Session, decision: routing_mod.Decision) -> N
     await _push_new_flow_prompt(s, interrupt)
 
 
-async def _do_return_to_caller(s: Session, decision: routing_mod.Decision) -> None:
+async def _do_return(s: Session, decision: routing_mod.Decision) -> None:
     exit_path = decision.exit_path
-    assert exit_path is not None
+    source_flow = decision.source_flow
+    assert exit_path is not None and source_flow is not None
+
+    # RETURN with no caller frame collapses to END (per schema).
+    if not s.state.has_caller:
+        s.events.emit(
+            FlowExited(
+                session_id=s.session_id,
+                flow_id=source_flow.id,
+                exit_path_id=exit_path.id,
+                reason="terminal",
+            )
+        )
+        s.events.emit(
+            SessionEnded(session_id=s.session_id, reason="agent_terminal")
+        )
+        s.state.end()
+        s.ended = True
+        return
+
     popped, caller = s.state.pop_to_caller()
     s.events.emit(
         FlowExited(
             session_id=s.session_id,
             flow_id=popped.flow_id,
             exit_path_id=exit_path.id,
-            reason="returned_to_caller",
+            reason="returned",
         )
     )
     caller_flow = s.spec.flows_by_id[caller.flow_id]
@@ -418,7 +446,7 @@ async def _do_return_to_caller(s: Session, decision: routing_mod.Decision) -> No
         FlowEntered(
             session_id=s.session_id,
             flow_id=caller_flow.id,
-            via="return_to_caller",
+            via="return",
             caller_flow_id=caller.caller_flow_id,
         )
     )
@@ -463,20 +491,10 @@ class PostLLMResolver(FrameProcessor):
         if s.tool_handler_fired_this_turn:
             return  # handler already advanced state
 
-        # No tool fired — the LLM produced text only. We "stay" by default,
-        # but tick the turn counter and check max_turns.
+        # No tool fired — the LLM produced text only. We "stay" by default
+        # and tick the turn counter (used for observability and future
+        # `_turn_count` reserved-variable support; see SCHEMA.md Open Questions).
         s.state.increment_turn()
-        active = s.spec.flows_by_id[s.state.active_flow_id]
-        if active.max_turns is not None and s.state.active.turn_count >= active.max_turns:
-            try:
-                fallback = routing_mod.force_max_turns_fallback(active)
-            except RuntimeError:
-                logger.warning(
-                    "{} hit max_turns but no unconditional sad exit available; staying",
-                    active.id,
-                )
-                return
-            await _apply_decision(fallback, s, llm_results=None)
 
 
 def add_capability_result_listener(session: Session) -> None:

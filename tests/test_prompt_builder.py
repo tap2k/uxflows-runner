@@ -37,15 +37,15 @@ def test_system_prompt_contains_agent_and_flow_pieces(coffee):
     # Flow section
     assert "This flow (flow_greet):" in prompt
     assert "Open warmly" in prompt
-    # Sample lines
-    assert "Sample lines" in prompt
+    # Scripted lines
+    assert "Scripted lines" in prompt
     assert "Welcome to Bluebird" in prompt or "welcome to Bluebird" in prompt
 
 
 def test_tools_includes_take_exit_and_trigger_interrupt_on_greet(coffee):
     """flow_greet now has all-llm exit conditions, plus a global interrupt.
     Both tools should appear in the per-turn schema."""
-    plan = routing.plan(coffee, "flow_greet", {}, in_interrupt=False)
+    plan = routing.plan(coffee, "flow_greet", {}, has_caller=False)
     tools = prompt_builder.build_tools(plan)
     assert tools is not None
     names = {t.name for t in tools.standard_tools}
@@ -53,7 +53,7 @@ def test_tools_includes_take_exit_and_trigger_interrupt_on_greet(coffee):
 
 
 def test_tools_includes_take_exit_path(coffee):
-    plan = routing.plan(coffee, "flow_greet", {}, in_interrupt=False)
+    plan = routing.plan(coffee, "flow_greet", {}, has_caller=False)
     tools = prompt_builder.build_tools(plan)
     assert tools is not None
     names = {t.name for t in tools.standard_tools}
@@ -61,7 +61,7 @@ def test_tools_includes_take_exit_path(coffee):
 
 
 def test_tools_includes_trigger_interrupt_when_applicable(coffee):
-    plan = routing.plan(coffee, "flow_coffee_order", {}, in_interrupt=False)
+    plan = routing.plan(coffee, "flow_coffee_order", {}, has_caller=False)
     tools = prompt_builder.build_tools(plan)
     assert tools is not None
     names = {t.name for t in tools.standard_tools}
@@ -74,7 +74,7 @@ def test_tools_includes_trigger_interrupt_when_applicable(coffee):
 def test_take_exit_path_enum_includes_only_llm_paths(coffee):
     """flow_coffee_order has two llm exits (xp_co_to_confirm, xp_co_cancel)
     and no calc-shortcut on an empty bag. Both should be in the enum."""
-    plan = routing.plan(coffee, "flow_coffee_order", {}, in_interrupt=False)
+    plan = routing.plan(coffee, "flow_coffee_order", {}, has_caller=False)
     tools = prompt_builder.build_tools(plan)
     take_tool = next(t for t in tools.standard_tools if t.name == "take_exit_path")
     enum = take_tool.properties["exit_path_id"]["enum"]
@@ -82,9 +82,9 @@ def test_take_exit_path_enum_includes_only_llm_paths(coffee):
 
 
 def test_take_exit_tool_inside_interrupt_offers_return(coffee):
-    """Inside int_menu, the only exit is return_to_caller — surfaced as an
+    """Inside int_menu, the only exit is a `goto: RETURN` — surfaced as an
     LLM-driven take_exit_path candidate so the LLM picks when to return."""
-    plan = routing.plan(coffee, "int_menu", {}, in_interrupt=True)
+    plan = routing.plan(coffee, "int_menu", {}, has_caller=True)
     tools = prompt_builder.build_tools(plan)
     assert tools is not None
     take_tool = next(t for t in tools.standard_tools if t.name == "take_exit_path")
@@ -98,22 +98,24 @@ def test_take_exit_tool_inside_interrupt_offers_return(coffee):
 
 
 def test_return_path_without_condition_falls_back_to_default():
-    """When a return_to_caller exit has no condition.expression, the tool
-    description uses the runner's default fallback text — keeps trivial
-    info-lookup interrupts working without per-spec ceremony."""
-    from uxflows_runner.spec.types import (
-        Agent, AgentMeta, Condition, ExitPath, Flow, Routing, Spec,
-    )
+    """When a RETURN exit has no condition.expression, the tool description
+    uses the runner's default fallback text — keeps trivial info-lookup
+    interrupts working without per-spec ceremony."""
     from uxflows_runner.spec.loader import _index
+    from uxflows_runner.spec.types import (
+        Agent,
+        AgentMeta,
+        Condition,
+        ExitPath,
+        Flow,
+        Spec,
+    )
 
     interrupt = Flow(
         id="int_q",
         type="interrupt",
-        scope=["global"],
-        routing=Routing(
-            entry_condition=Condition(method="llm", expression="patron asks something"),
-            exit_paths=[ExitPath(id="x_back", type="return_to_caller", next_flow_id=None)],
-        ),
+        entry_condition=Condition(method="llm", expression="patron asks something"),
+        exit_paths=[ExitPath(id="x_back", goto="RETURN")],
     )
     main_flow = Flow(id="f", type="happy")
     spec = Spec(
@@ -121,7 +123,7 @@ def test_return_path_without_condition_falls_back_to_default():
         flows=[main_flow, interrupt],
     )
     loaded = _index(spec, raw='{}')
-    plan = routing.plan(loaded, "int_q", {}, in_interrupt=True)
+    plan = routing.plan(loaded, "int_q", {}, has_caller=True)
     tools = prompt_builder.build_tools(plan)
     take_tool = next(t for t in tools.standard_tools if t.name == "take_exit_path")
     desc = take_tool.properties["exit_path_id"]["description"]
@@ -130,7 +132,11 @@ def test_return_path_without_condition_falls_back_to_default():
 
 def test_per_language_faq_used():
     from uxflows_runner.spec.types import (
-        Agent, AgentKnowledge, AgentMeta, FAQEntry, Flow, Routing,
+        Agent,
+        AgentKnowledge,
+        AgentMeta,
+        FAQEntry,
+        Flow,
     )
 
     agent = Agent(
@@ -140,15 +146,15 @@ def test_per_language_faq_used():
         knowledge=AgentKnowledge(
             faq=[
                 FAQEntry(
+                    id="faq_hours",
                     question="hours?",
-                    answer="open 9-5",
-                    scripts={"es-ES": "abierto de 9 a 17"},
+                    answer={"en-US": "open 9-5", "es-ES": "abierto de 9 a 17"},
                 )
             ]
         ),
         entry_flow_id="f",
     )
-    flow = Flow(id="f", type="happy", routing=Routing())
+    flow = Flow(id="f", type="happy")
     es = prompt_builder.build_system_prompt(agent, flow, lang="es-ES")
     en = prompt_builder.build_system_prompt(agent, flow, lang="en-US")
     assert "abierto de 9 a 17" in es
@@ -212,26 +218,22 @@ def test_take_exit_description_substitutes_session_variables():
         Condition,
         ExitPath,
         Flow,
-        Routing,
         Spec,
     )
 
     main_flow = Flow(
         id="f",
         type="happy",
-        routing=Routing(
-            exit_paths=[
-                ExitPath(
-                    id="xp_in_grace",
-                    type="happy",
-                    condition=Condition(
-                        method="llm",
-                        expression="customer's date is on or before {extended_loan_due_date}",
-                    ),
-                    next_flow_id=None,
-                )
-            ],
-        ),
+        exit_paths=[
+            ExitPath(
+                id="xp_in_grace",
+                goto="END",
+                condition=Condition(
+                    method="llm",
+                    expression="customer's date is on or before {extended_loan_due_date}",
+                ),
+            )
+        ],
     )
     spec = _index(
         Spec(
@@ -242,7 +244,7 @@ def test_take_exit_description_substitutes_session_variables():
         ),
         raw="{}",
     )
-    plan = routing.plan(spec, "f", {}, in_interrupt=False)
+    plan = routing.plan(spec, "f", {}, has_caller=False)
     tools = prompt_builder.build_tools(
         plan, {"extended_loan_due_date": "2026-06-12"}
     )
@@ -260,7 +262,6 @@ def test_build_system_prompt_substitutes_across_multiple_sections(coffee):
         Agent,
         AgentMeta,
         Flow,
-        Routing,
         Script,
     )
 
@@ -275,9 +276,8 @@ def test_build_system_prompt_substitutes_across_multiple_sections(coffee):
     flow = Flow(
         id="f",
         type="happy",
-        routing=Routing(),
         instructions="Greet {customer_name} warmly.",
-        scripts={"en-US": [Script(id="s_welcome", text="Welcome, {customer_name}!")]},
+        scripts=[Script(id="s_welcome", text="Welcome, {customer_name}!")],
     )
 
     prompt = prompt_builder.build_system_prompt(
