@@ -36,6 +36,14 @@
         <input id="api-key" type="password" placeholder="AIza... (leave blank for env credentials)" autocomplete="off" />
       </section>
 
+      <section class="context-vars">
+        <details>
+          <summary>Context vars (JSON, optional)</summary>
+          <textarea id="context-vars" rows="4" placeholder='{"customer_first_name": "Daniel", "assistant_name": "Andrea"}'></textarea>
+          <p class="context-vars-hint">Seeded into the variable bag at session start. Fills <code>{customer_first_name}</code>-style placeholders in scripts and prompts. Empty = no seeding.</p>
+        </details>
+      </section>
+
       <section class="controls">
         <button id="start" type="button" disabled>Start</button>
         <button id="reset" type="button" disabled>Reset</button>

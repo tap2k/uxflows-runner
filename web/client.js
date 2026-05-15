@@ -14,6 +14,7 @@ const clearSpecBtn = $("clear-spec");
 const specFileInput = $("spec-file");
 const specSummary = $("spec-summary");
 const languageSelect = $("language");
+const contextVarsInput = $("context-vars");
 
 let pc = null;
 let localStream = null;
@@ -170,6 +171,26 @@ async function connect() {
     }
     if (languageSelect.value) {
       offerBody.language = languageSelect.value;
+    }
+    const raw = contextVarsInput?.value.trim();
+    if (raw) {
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (e) {
+        setStatus("error", "context vars invalid");
+        showError(`context vars must be valid JSON: ${e.message}`);
+        teardown();
+        return;
+      }
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        offerBody.context_vars = parsed;
+      } else {
+        setStatus("error", "context vars invalid");
+        showError("context vars must be a JSON object (not an array or primitive)");
+        teardown();
+        return;
+      }
     }
     const res = await fetch("/api/offer", {
       method: "POST",

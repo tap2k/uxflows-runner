@@ -12,6 +12,7 @@ const els = {
   clearSpec: $("clear-spec"),
   apiKey: $("api-key"),
   language: $("language"),
+  contextVars: $("context-vars"),
   start: $("start"),
   reset: $("reset"),
   errors: $("errors"),
@@ -113,6 +114,28 @@ async function startSession() {
     api_key: els.apiKey.value.trim() || undefined,
     language: els.language.value || undefined,
   };
+
+  const raw = els.contextVars?.value.trim();
+  if (raw) {
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      showError(`context vars must be valid JSON: ${e.message}`);
+      setStatus("idle", "idle");
+      state.inflight = false;
+      refreshButtons();
+      return;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      showError("context vars must be a JSON object (not an array or primitive)");
+      setStatus("idle", "idle");
+      state.inflight = false;
+      refreshButtons();
+      return;
+    }
+    body.context_vars = parsed;
+  }
 
   try {
     const res = await fetch("/api/chat/session", {
