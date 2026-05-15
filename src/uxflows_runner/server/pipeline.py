@@ -29,10 +29,9 @@ from uxflows_runner.dispatcher.capabilities import CapabilityDispatcher, load_ex
 from uxflows_runner.dispatcher.processor import (
     PostLLMResolver,
     PreLLMPlanner,
-    TextFrameWatcher,
+    RouteTagFrameProcessor,
     UserTranscriptWatcher,
     add_capability_result_listener,
-    register_dispatcher_tools,
 )
 from uxflows_runner.dispatcher.prompt_builder import build_system_prompt
 from uxflows_runner.dispatcher.session import Session
@@ -119,11 +118,9 @@ async def run_session(
 
     add_capability_result_listener(session)
 
-    register_dispatcher_tools(llm, session)
-
     pre = PreLLMPlanner(session)
     user_transcript_watch = UserTranscriptWatcher(session)
-    text_watch = TextFrameWatcher(session)
+    route_tag_processor = RouteTagFrameProcessor(session)
     post = PostLLMResolver(session)
 
     pipeline = Pipeline(
@@ -134,7 +131,7 @@ async def run_session(
             context_aggregator.user(),
             pre,
             llm,
-            text_watch,
+            route_tag_processor,
             tts,
             transport.output(),
             post,

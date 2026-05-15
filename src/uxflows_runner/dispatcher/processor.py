@@ -34,6 +34,7 @@ Two FrameProcessors and two LLM tool handlers, all closing over a shared
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from loguru import logger
@@ -41,17 +42,11 @@ from pipecat.frames.frames import (
     Frame,
     LLMContextFrame,
     LLMFullResponseEndFrame,
-    LLMRunFrame,
     LLMTextFrame,
     TranscriptionFrame,
 )
 from pipecat.processors.aggregators.llm_context import NOT_GIVEN
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.services.llm_service import (
-    FunctionCallParams,
-    FunctionCallResultProperties,
-    LLMService,
-)
 
 from uxflows_runner.events.schema import (
     CapabilityInvoked,
@@ -68,8 +63,10 @@ from uxflows_runner.spec.types import Flow
 
 from . import assigns as assigns_mod
 from . import routing as routing_mod
+from . import routing_protocol
 from .capabilities import CapabilityResult
-from .prompt_builder import build_system_prompt, build_tools
+from .prompt_builder import build_system_prompt
+from .routing_protocol import RouteTag
 from .session import Session
 
 
@@ -79,12 +76,10 @@ from .session import Session
 
 
 class PreLLMPlanner(FrameProcessor):
-    """Per-turn: plan routing + load tools into context.
-
-    Honors `session.skip_next_planning` for the silent-take_exit follow-up:
-    when set, this pass leaves tools/prompt as-is (the take_exit handler
-    already cleared tools and pushed the new flow's prompt) so the follow-up
-    inference runs text-only and can't chain another routing decision.
+    """Per-turn: re-plan routing for the active flow so the system prompt
+    rendered for this inference includes the right `<route>` candidates.
+    The plan is also stashed on the session for `apply_route` to consume
+    when the LLM emits a tag.
     """
 
     def __init__(self, session: Session) -> None:
@@ -96,54 +91,220 @@ class PreLLMPlanner(FrameProcessor):
         if isinstance(frame, LLMContextFrame) and direction == FrameDirection.DOWNSTREAM:
             s = self._session
             if not s.ended and s.state.stack:
-                if s.skip_next_planning:
-                    # Consume the flag — only this single inference is exempt.
-                    s.skip_next_planning = False
-                else:
-                    plan_for_active_flow(s)
+                plan_for_active_flow(s)
                 s.tool_handler_fired_this_turn = False
-                s.text_emitted_this_turn = False
         await self.push_frame(frame, direction)
 
 
-class TextFrameWatcher(FrameProcessor):
-    """Sits between the LLM service and TTS. Two responsibilities:
+class RouteTagFrameProcessor(FrameProcessor):
+    """Sits between the LLM service and TTS. Four responsibilities:
 
-    1. Flip `session.text_emitted_this_turn = True` whenever the LLM pushes a
-       non-empty `LLMTextFrame` — used by the silent-take_exit follow-up to
-       detect responses where the model emitted ONLY a tool call (silent UX).
-    2. Accumulate the streamed text parts of this response and emit a
-       `TurnCompleted` event when the response ends — so JSONL traces show
-       what the agent actually said, not just which exits fired.
+    1. Strip `<route .../>` tag bytes out of the text stream before they
+       reach TTS — the user must never hear "less than route exit equals...".
+    2. Strip `<think>...</think>` blocks (reserved reasoning sentinel; see
+       routing_protocol module docstring). These are reasoning scaffolding
+       the LLM is encouraged to emit but the user shouldn't hear.
+    3. Accumulate the streamed conversational text and emit a TurnCompleted
+       event for the agent's turn (with both sentinel forms stripped).
+    4. On end-of-response, dispatch the parsed route tag (if any) via
+       apply_route so the dispatcher mutates flow state and re-plans.
 
-    Pipecat's LLM service streams text parts via `push_frame()` synchronously
-    during response generation; tool handlers run after streaming ends.
-    By the time the take_exit handler reads this flag, all text frames from
-    THIS response have already propagated past the watcher.
+    Other tag-shaped text (`<strong>`, `<VERIFICATION>`, etc.) is NOT
+    stripped — those are domain concepts an author might legitimately use.
+    Add a new reserved sentinel here only when a concrete need arises.
+
+    The state machine handles streaming chunks of any size — bytes arrive
+    in arbitrary boundaries, and a `<` may straddle a chunk boundary.
     """
+
+    # State
+    _FORWARDING = "forwarding"
+    _BUFFERING = "buffering"  # saw a `<`, haven't yet determined what it is
+    _IN_THINK = "in_think"  # inside a `<think>...</think>` block; discard
+
+    # Once the buffer exceeds this length without resolving, give up and
+    # flush as plain text. Generous — accommodates `<route ...attrs.../>`
+    # of reasonable length without blocking forever on a malformed prefix.
+    _MAX_BUFFER = 256
 
     def __init__(self, session: Session) -> None:
         super().__init__()
         self._session = session
-        self._buf: list[str] = []
+        # Conversational text that will reach TTS and be recorded in
+        # TurnCompleted (sentinel bytes are NOT included).
+        self._spoken: list[str] = []
+        self._state = self._FORWARDING
+        self._buf = ""
+        # Parsed tag captured during this response (apply_route fires once,
+        # on LLMFullResponseEndFrame).
+        self._captured_tag: RouteTag | None = None
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
         if direction == FrameDirection.DOWNSTREAM:
             if isinstance(frame, LLMTextFrame) and frame.text:
-                self._session.text_emitted_this_turn = True
-                self._buf.append(frame.text)
+                emit = self._consume_text(frame.text)
+                if emit:
+                    await self.push_frame(LLMTextFrame(text=emit), direction)
+                return  # don't push the original frame
             elif isinstance(frame, LLMFullResponseEndFrame):
-                if self._buf:
+                # Flush any pending buffer that never resolved — it's plain
+                # text we held back; speak it now. Exception: if we were
+                # inside a `<think>` block that never closed, discard it.
+                if self._state == self._BUFFERING and self._buf:
+                    await self.push_frame(LLMTextFrame(text=self._buf), direction)
+                    self._spoken.append(self._buf)
+                self._buf = ""
+                self._state = self._FORWARDING
+                # Emit the TurnCompleted event for the agent's reply.
+                if self._spoken:
                     self._session.events.emit(
                         TurnCompleted(
                             session_id=self._session.session_id,
                             role="agent",
-                            text="".join(self._buf),
+                            text="".join(self._spoken).strip(),
                         )
                     )
-                self._buf.clear()
+                # Dispatch the parsed tag (if any). apply_route fires the
+                # routing decision and mutates state. Done AFTER text frames
+                # have streamed past so TTS gets the closing line before
+                # any session tear-down.
+                tag = self._captured_tag
+                self._spoken.clear()
+                self._captured_tag = None
+                if tag is not None:
+                    await apply_route(self._session, tag)
         await self.push_frame(frame, direction)
+
+    def _consume_text(self, chunk: str) -> str:
+        """Process one streamed text chunk through the state machine.
+        Returns the substring that should be forwarded to TTS (may be empty).
+        """
+        out_parts: list[str] = []
+        i = 0
+        while i < len(chunk):
+            if self._state == self._FORWARDING:
+                lt = chunk.find("<", i)
+                if lt < 0:
+                    out_parts.append(chunk[i:])
+                    break
+                if lt > i:
+                    out_parts.append(chunk[i:lt])
+                self._state = self._BUFFERING
+                self._buf = "<"
+                i = lt + 1
+            elif self._state == self._IN_THINK:
+                # Scan for `</think>` close. Until we find it, every byte is
+                # discarded. The close-tag spelling is loose (`</think>`,
+                # `</ think >`, case-insensitive) to match the regex used in
+                # routing_protocol.strip_think_blocks.
+                end = _find_think_close(chunk, i)
+                if end < 0:
+                    i = len(chunk)
+                else:
+                    self._state = self._FORWARDING
+                    i = end
+            else:  # BUFFERING
+                gt = chunk.find(">", i)
+                if gt < 0:
+                    self._buf += chunk[i:]
+                    i = len(chunk)
+                else:
+                    self._buf += chunk[i : gt + 1]
+                    i = gt + 1
+                resolved = self._resolve_buffer()
+                if resolved is _ENTERED_THINK:
+                    self._state = self._IN_THINK
+                    self._buf = ""
+                elif resolved is not None:
+                    out_parts.append(resolved)
+                    self._state = self._FORWARDING
+                    self._buf = ""
+                elif len(self._buf) > self._MAX_BUFFER:
+                    out_parts.append(self._buf)
+                    self._state = self._FORWARDING
+                    self._buf = ""
+        spoken = "".join(out_parts)
+        if spoken:
+            self._spoken.append(spoken)
+        return spoken
+
+    def _resolve_buffer(self) -> "str | object | None":
+        """Inspect the current buffer. Outcomes:
+
+        - `<route .../>` self-closing: capture, return "" (swallow bytes).
+        - `<think>` opening tag: signal IN_THINK via the _ENTERED_THINK
+          sentinel so the caller switches state to discard mode.
+        - `<...>` complete non-reserved tag: flush verbatim.
+        - Incomplete prefix that COULD still grow into a reserved sentinel:
+          return None (keep buffering).
+        - Incomplete prefix that can't be reserved: flush early.
+        """
+        if ">" not in self._buf:
+            if not _could_be_reserved_prefix(self._buf):
+                return self._buf
+            return None
+        # Buffer is `<...>`. Check `<think>` open first (block-form, not
+        # self-closing). The regex `<\s*think\b[^>]*>` matches the open tag.
+        if _THINK_OPEN_RE.match(self._buf):
+            return _ENTERED_THINK
+        # Then try the route tag.
+        cleaned, tag = routing_protocol.find_tag(self._buf)
+        if tag is None:
+            return self._buf  # plain `<...>` text — flush
+        if tag.is_valid:
+            if self._captured_tag is None:
+                self._captured_tag = tag
+            else:
+                logger.warning(
+                    "multiple route tags in one response; ignoring all but the first"
+                )
+        return cleaned
+
+
+# Sentinel returned by _resolve_buffer when the buffer opens a <think> block.
+# Distinct from None / strings so the caller can tell "switch to IN_THINK"
+# apart from "flush this text" or "keep buffering".
+#
+# SMELL: the `str | object | None` return shape works for two sentinels but
+# won't generalize. If a third reserved sentinel is added (see
+# routing_protocol module docstring), refactor `_resolve_buffer` to return
+# a typed ResolveResult dataclass with an explicit action enum + payload.
+# Likewise `_could_be_reserved_prefix` / `_could_grow_into` should be
+# driven by a single registered list of prefixes rather than hand-rolled.
+_ENTERED_THINK = object()
+
+_THINK_OPEN_RE = re.compile(r"<\s*think\b[^>]*>", re.IGNORECASE)
+
+
+def _could_be_reserved_prefix(buf: str) -> bool:
+    """True if `buf` could still grow into a reserved sentinel
+    (`<route ...` or `<think>...`). False once we're sure it can't — so the
+    buffering processor can flush early."""
+    return _could_grow_into(buf, "<route") or _could_grow_into(buf, "<think")
+
+
+def _could_grow_into(buf: str, target: str) -> bool:
+    """True if `buf` is a prefix of `target` or vice-versa with a valid
+    boundary (whitespace / `/` / `>`)."""
+    if len(buf) <= len(target):
+        return target.startswith(buf.lower())
+    head = buf[: len(target)].lower()
+    if head != target:
+        return False
+    nxt = buf[len(target)]
+    return nxt in (" ", "\t", "\n", "/", ">")
+
+
+def _find_think_close(chunk: str, start: int) -> int:
+    """Return the index just AFTER `</think>` in chunk starting at start, or
+    -1 if not present. Mirrors the loose close-tag spelling of the regex."""
+    match = re.search(r"<\s*/\s*think\s*>", chunk[start:], re.IGNORECASE)
+    if match is None:
+        return -1
+    return start + match.end()
+
+
 
 
 class UserTranscriptWatcher(FrameProcessor):
@@ -190,12 +351,15 @@ def plan_for_active_flow(s: Session) -> None:
         has_caller=s.state.has_caller,
     )
     s.current_plan = plan
-    tools = build_tools(s.spec, plan, s.state.variables)
-    # LLMContext requires ToolsSchema or NOT_GIVEN — never None.
-    s.llm_context.set_tools(tools if tools is not None else NOT_GIVEN)
+    # No tools — routing is in-text via <route .../> tags. Clear any prior
+    # tool schema so providers don't switch into tool-mode (causes silent
+    # function-call-only responses we used to patch around).
+    s.llm_context.set_tools(NOT_GIVEN)
     active = s.spec.flows_by_id[s.state.active_flow_id]
     new_prompt = build_system_prompt(
-        s.spec, active, s.state.language, variables=s.state.variables
+        s.spec, active, s.state.language,
+        variables=s.state.variables,
+        plan=plan,
     )
     _replace_system_message(s.llm_context, new_prompt)
 
@@ -211,108 +375,38 @@ def _replace_system_message(context: Any, new_prompt: str) -> None:
     context.messages.insert(0, {"role": "system", "content": new_prompt})
 
 
-# --------------------------------------------------------------------------
-# Tool handler factory
-# --------------------------------------------------------------------------
-
-
-def register_dispatcher_tools(llm: LLMService, session: Session) -> None:
-    """Register `take_exit_path` and `trigger_interrupt` on the LLM service.
-
-    Pipecat-mode glue: thin wrappers around `apply_tool_call` (the framework-
-    agnostic core) plus the Pipecat-specific result_callback + LLMRunFrame
-    follow-up. Text mode (server/text_session.py) calls `apply_tool_call`
-    directly with its own follow-up mechanism.
-    """
-
-    async def _take_exit_path(params: FunctionCallParams) -> None:
-        decision = await apply_tool_call(session, "take_exit_path", dict(params.arguments))
-        await params.result_callback(
-            {}, properties=FunctionCallResultProperties(run_llm=False)
-        )
-        if decision is None:
-            return
-        if decision.kind in ("trigger_interrupt", "return") and not session.pending_end:
-            await params.llm.push_frame(LLMRunFrame())
-            return
-        # Silent take_exit / end follow-up: Gemini sometimes emits the tool
-        # call with no text part — state mutates correctly but the user gets
-        # dead air. Push ONE follow-up inference with tools cleared so the
-        # model produces words and can't chain another transition. The source
-        # flow's prompt is still loaded (take_exit only swaps AFTER this
-        # frame fires; end defers tear-down via s.pending_end), so the
-        # closing line is spoken in the source flow's voice. For pending
-        # ends, finalize_pending_end() runs on the resulting turn-end.
-        # `return` decisions that collapsed to a pending_end (RETURN with no
-        # caller frame, per schema) take this path too — same lifecycle as
-        # an explicit END.
-        if (
-            (decision.kind in ("take_exit", "end") or session.pending_end)
-            and not session.text_emitted_this_turn
-            and not session.ended
-        ):
-            session.llm_context.set_tools(NOT_GIVEN)
-            session.skip_next_planning = True
-            await params.llm.push_frame(LLMRunFrame())
-
-    async def _trigger_interrupt(params: FunctionCallParams) -> None:
-        decision = await apply_tool_call(session, "trigger_interrupt", dict(params.arguments))
-        await params.result_callback(
-            {}, properties=FunctionCallResultProperties(run_llm=False)
-        )
-        if decision is not None and decision.kind in ("trigger_interrupt", "return"):
-            await params.llm.push_frame(LLMRunFrame())
-
-    llm.register_function("take_exit_path", _take_exit_path)
-    llm.register_function("trigger_interrupt", _trigger_interrupt)
-
-
-async def apply_tool_call(
-    session: Session, tool_name: str, args: dict[str, Any]
+async def apply_route(
+    session: Session, tag: RouteTag
 ) -> routing_mod.Decision | None:
-    """Framework-agnostic core of dispatch: resolve LLM tool args into a
-    Decision, mutate session state (assigns, capabilities, flow stack, events),
-    and re-plan the active flow if a transition happened.
+    """Framework-agnostic core of in-text routing: resolve a parsed route
+    tag into a Decision, mutate session state, and re-plan if a transition
+    happened.
 
-    Returns the Decision so the caller can decide whether a follow-up LLM
-    inference is needed. Two follow-up shapes exist:
+    The tag is whatever was inside the LLM's `<route .../>` emission. By
+    the time we get here:
+      - the LLM's conversational reply has already streamed to TTS / been
+        returned to the text caller (the tag is the trailing token); and
+      - the streaming stripper (voice) / response splitter (text) has
+        already removed the tag bytes from the channel that would reach
+        the user.
 
-    - **New-flow follow-up** (`trigger_interrupt`, `return` into a caller):
-      the new flow's prompt is loaded and the LLM should speak its opener.
-      Gemini AUTO mode tends to emit ONLY the function call on these (silence
-      to the user); a second LLMRunFrame against the new prompt is needed.
-
-    - **Source-flow silent follow-up** (`take_exit`, `end`, or `return`
-      collapsed to a pending end): the source flow's prompt is still loaded
-      and the LLM should speak the flow's closing line before we transition
-      or tear down. Gemini reliably co-emits text with `take_exit_path`, but
-      not always — when it doesn't, we fire one tools-cleared follow-up so
-      the model can only produce text (no chained transitions). For `end`
-      decisions, tear-down is deferred via `s.pending_end` so the prompt
-      stays loaded; `finalize_pending_end` completes the lifecycle at
-      turn-end.
-
-    Voice mode pushes an LLMRunFrame for the follow-up; text mode does a
-    second generate_content call inline.
-
-    Returns None if the tool call arrived without a current_plan (guard
-    against PreLLMPlanner not having run).
-
-    SMELL: callers currently classify which follow-up shape applies by
-    checking `decision.kind` plus `session.pending_end` directly. That
-    classification is duplicated in voice (`_take_exit_path`) and text
-    (`_run_one_turn`). If a third call-site appears or the rules grow
-    another case, extract a `follow_up_for(decision, session)` helper that
-    returns a pipeline-action enum. Two call-sites isn't yet worth it.
+    Returns the Decision (None if no current_plan — guard against the
+    parse firing before PreLLMPlanner). Unlike the legacy tool-call path,
+    callers do NOT need to issue a follow-up inference: the closing line
+    streamed before the tag did, so END can tear down immediately and
+    flow transitions don't need a "silent take_exit" workaround.
     """
     s = session
     s.tool_handler_fired_this_turn = True
 
     if s.current_plan is None:
-        logger.warning("tool handler fired without a current_plan; ignoring")
+        logger.warning("route tag arrived without a current_plan; ignoring")
+        return None
+    if not tag.is_valid:
+        logger.warning("route tag invalid (neither/both exit and interrupt); ignoring")
         return None
 
-    llm_results = {tool_name: args}
+    llm_results = routing_protocol.to_llm_results(tag)
     decision = routing_mod.resolve(s.current_plan, s.spec, llm_results)
     await _apply_decision(decision, s, llm_results=llm_results)
 
@@ -321,28 +415,6 @@ async def apply_tool_call(
         plan_for_active_flow(s)
 
     return decision
-
-
-def finalize_pending_end(s: Session) -> bool:
-    """Complete a deferred session end. Called at turn-end after any silent
-    follow-up has produced the closing utterance. Emits SessionEnded and
-    tears down. Returns True if a tear-down occurred.
-
-    The deferral pattern: when an exit-path's goto is END (or RETURN with no
-    caller), `_do_take_exit` / `_do_return` set `s.pending_end = True` and
-    return without tearing down. The source flow's prompt stays loaded so a
-    silent-take_exit follow-up can speak the flow's closing line in the
-    source flow's voice. Once that turn completes, this finalizer fires.
-    """
-    if not s.pending_end or s.ended:
-        return False
-    from uxflows_runner.events.schema import SessionEnded
-
-    s.events.emit(SessionEnded(session_id=s.session_id, reason="agent_terminal"))
-    s.state.end()
-    s.ended = True
-    s.pending_end = False
-    return True
 
 
 async def apply_planned_shortcut(s: Session) -> bool:
@@ -436,10 +508,9 @@ async def _do_take_exit(
     )
 
     if decision.kind == "end":
-        # Decoupled lifecycle: emit FlowExited and mark the session as
-        # pending_end, but do NOT tear down yet. The source flow's prompt
-        # stays loaded so the silent-follow-up can produce a closing line.
-        # finalize_pending_end() runs at turn-end and emits SessionEnded.
+        # In-text routing: the closing line streamed BEFORE this tag was
+        # parsed, so tear down immediately. No need for the pending_end /
+        # silent-follow-up dance the tool-call path used to require.
         s.events.emit(
             FlowExited(
                 session_id=s.session_id,
@@ -448,7 +519,11 @@ async def _do_take_exit(
                 reason="terminal",
             )
         )
-        s.pending_end = True
+        s.events.emit(
+            SessionEnded(session_id=s.session_id, reason="agent_terminal")
+        )
+        s.state.end()
+        s.ended = True
         return
 
     # take_exit — transition into a flow.
@@ -516,8 +591,8 @@ async def _do_return(s: Session, decision: routing_mod.Decision) -> None:
     source_flow = decision.source_flow
     assert exit_path is not None and source_flow is not None
 
-    # RETURN with no caller frame collapses to END (per schema). Defer the
-    # tear-down — same lifecycle as `_do_take_exit`'s end branch.
+    # RETURN with no caller frame collapses to END (per schema). The reply
+    # already streamed before the route tag, so tear down immediately.
     if not s.state.has_caller:
         s.events.emit(
             FlowExited(
@@ -527,7 +602,11 @@ async def _do_return(s: Session, decision: routing_mod.Decision) -> None:
                 reason="terminal",
             )
         )
-        s.pending_end = True
+        s.events.emit(
+            SessionEnded(session_id=s.session_id, reason="agent_terminal")
+        )
+        s.state.end()
+        s.ended = True
         return
 
     popped, caller = s.state.pop_to_caller()
@@ -586,18 +665,12 @@ class PostLLMResolver(FrameProcessor):
         s = self._session
         if s.ended:
             return
-
-        # If a previous turn deferred a session end so its silent follow-up
-        # could speak, this is the turn after that follow-up — finalize now.
-        if finalize_pending_end(s):
-            return
-
         if s.tool_handler_fired_this_turn:
-            return  # handler already advanced state
+            return  # apply_route already advanced state earlier in this turn
 
-        # No tool fired — the LLM produced text only. If this is a terminator
-        # flow, apply its planned shortcut so it ends after speaking its line.
-        # (The shortcut itself may set pending_end; finalize runs next turn.)
+        # No route tag fired — the LLM produced plain text. If this is a
+        # terminator flow (single unconditional exit), fire its pre-resolved
+        # shortcut so it ends after speaking its line instead of looping.
         if await apply_planned_shortcut(s):
             return
         s.state.increment_turn()

@@ -42,92 +42,50 @@ def test_system_prompt_contains_agent_and_flow_pieces(coffee):
     assert "Welcome to Bluebird" in prompt or "welcome to Bluebird" in prompt
 
 
-def test_tools_includes_take_exit_and_trigger_interrupt_on_greet(coffee):
-    """flow_greet now has all-llm exit conditions, plus a global interrupt.
-    Both tools should appear in the per-turn schema."""
+def test_routing_protocol_lists_exits_and_interrupts_on_greet(coffee):
+    """flow_greet has three llm-method exits plus a global interrupt
+    (int_menu). All four should appear in the rendered routing protocol
+    section, identified by their ids."""
+    flow = coffee.flows_by_id["flow_greet"]
     plan = routing.plan(coffee, "flow_greet", {}, has_caller=False)
-    tools = prompt_builder.build_tools(coffee, plan)
-    assert tools is not None
-    names = {t.name for t in tools.standard_tools}
-    assert names == {"take_exit_path", "trigger_interrupt"}
+    prompt = prompt_builder.build_system_prompt(coffee, flow, lang="en-US", plan=plan)
+    assert "ROUTING PROTOCOL" in prompt
+    assert "xp_greet_to_coffee" in prompt
+    assert "xp_greet_to_tea" in prompt
+    assert "xp_greet_walkaway" in prompt
+    assert "int_menu" in prompt
 
 
-def test_tools_includes_take_exit_path(coffee):
-    plan = routing.plan(coffee, "flow_greet", {}, has_caller=False)
-    tools = prompt_builder.build_tools(coffee, plan)
-    assert tools is not None
-    names = {t.name for t in tools.standard_tools}
-    assert "take_exit_path" in names
+def test_routing_protocol_omitted_when_no_plan(coffee):
+    """At session start (no plan yet) the routing section is skipped — the
+    LLM just talks until the first turn produces a plan."""
+    flow = coffee.flows_by_id["flow_greet"]
+    prompt = prompt_builder.build_system_prompt(coffee, flow, lang="en-US")
+    assert "ROUTING PROTOCOL" not in prompt
 
 
-def test_tools_includes_trigger_interrupt_when_applicable(coffee):
-    plan = routing.plan(coffee, "flow_coffee_order", {}, has_caller=False)
-    tools = prompt_builder.build_tools(coffee, plan)
-    assert tools is not None
-    names = {t.name for t in tools.standard_tools}
-    assert "trigger_interrupt" in names
-    interrupt_tool = next(t for t in tools.standard_tools if t.name == "trigger_interrupt")
-    enum = interrupt_tool.properties["interrupt_flow_id"]["enum"]
-    assert "int_menu" in enum
-
-
-def test_take_exit_path_enum_includes_only_llm_paths(coffee):
-    """flow_coffee_order has two llm exits (xp_co_to_confirm, xp_co_cancel)
-    and no calc-shortcut on an empty bag. Both should be in the enum."""
-    plan = routing.plan(coffee, "flow_coffee_order", {}, has_caller=False)
-    tools = prompt_builder.build_tools(coffee, plan)
-    take_tool = next(t for t in tools.standard_tools if t.name == "take_exit_path")
-    enum = take_tool.properties["exit_path_id"]["enum"]
-    assert set(enum) == {"xp_co_to_confirm", "xp_co_cancel"}
-
-
-def test_take_exit_tool_inside_interrupt_offers_return(coffee):
-    """Inside int_menu, the only exit is a `goto: RETURN` — surfaced as an
-    LLM-driven take_exit_path candidate so the LLM picks when to return."""
+def test_routing_protocol_inside_interrupt_offers_return(coffee):
+    """Inside int_menu the only exit is a RETURN — render it as a route
+    candidate with its condition expression."""
+    flow = coffee.flows_by_id["int_menu"]
     plan = routing.plan(coffee, "int_menu", {}, has_caller=True)
-    tools = prompt_builder.build_tools(coffee, plan)
-    assert tools is not None
-    take_tool = next(t for t in tools.standard_tools if t.name == "take_exit_path")
-    assert take_tool.properties["exit_path_id"]["enum"] == ["xp_int_menu_return"]
-    # int_menu's return path carries a condition.expression — that wins over
-    # the hardcoded default, giving the LLM spec-author-controlled guidance
-    # about WHEN to return rather than vague "naturally complete" prose.
-    desc = take_tool.properties["exit_path_id"]["description"]
-    assert "xp_int_menu_return" in desc
-    assert "named a drink" in desc
+    prompt = prompt_builder.build_system_prompt(coffee, flow, lang="en-US", plan=plan)
+    assert "xp_int_menu_return" in prompt
+    # int_menu's return exit carries a condition.expression — that's what the
+    # author wrote, and the routing protocol uses it verbatim so the LLM
+    # knows WHEN to fire the return tag.
+    assert "named a drink" in prompt
 
 
-def test_return_path_without_condition_falls_back_to_default():
-    """When a RETURN exit has no condition.expression, the tool description
-    uses the runner's default fallback text — keeps trivial info-lookup
-    interrupts working without per-spec ceremony."""
-    from uxflows_runner.spec.loader import _index
-    from uxflows_runner.spec.types import (
-        Agent,
-        AgentMeta,
-        Condition,
-        ExitPath,
-        Flow,
-        Spec,
-    )
-
-    interrupt = Flow(
-        id="int_q",
-        type="interrupt",
-        entry_condition=Condition(method="llm", expression="patron asks something"),
-        exit_paths=[ExitPath(id="x_back", goto="RETURN")],
-    )
-    main_flow = Flow(id="f", type="happy")
-    spec = Spec(
-        agent=Agent(id="ag", meta=AgentMeta(modes=["voice"]), entry_flow_id="f"),
-        flows=[main_flow, interrupt],
-    )
-    loaded = _index(spec, raw='{}')
-    plan = routing.plan(loaded, "int_q", {}, has_caller=True)
-    tools = prompt_builder.build_tools(loaded, plan)
-    take_tool = next(t for t in tools.standard_tools if t.name == "take_exit_path")
-    desc = take_tool.properties["exit_path_id"]["description"]
-    assert "Return to the previous flow" in desc
+def test_routing_protocol_render_includes_destinations(coffee):
+    """Each exit in the routing section names the destination flow so the
+    LLM can reason about where each path leads."""
+    flow = coffee.flows_by_id["flow_greet"]
+    plan = routing.plan(coffee, "flow_greet", {}, has_caller=False)
+    prompt = prompt_builder.build_system_prompt(coffee, flow, lang="en-US", plan=plan)
+    # Destination is rendered as "→ <flow.name>" (or id fallback).
+    coffee_order = coffee.flows_by_id["flow_coffee_order"]
+    assert f"→ {coffee_order.name or 'flow_coffee_order'}" in prompt
 
 
 def test_per_language_faq_used():
@@ -208,12 +166,12 @@ def test_substitute_variables_handles_none_and_empty_inputs():
 # --------------------------------------------------------------------------
 
 
-def test_take_exit_description_substitutes_session_variables():
+def test_routing_protocol_substitutes_session_variables():
     """Session variables substitute inside condition expressions when rendered
-    into tool descriptions — same {placeholder} mechanism that runs over
-    scripts and instructions. Lets a spec author write a date/amount-aware
-    routing gate like 'on or before {extended_loan_due_date}' and have the
-    LLM see the resolved value at decision time."""
+    into the routing protocol section — same {placeholder} mechanism that
+    runs over scripts and instructions. Lets a spec author write a date /
+    amount-aware routing gate like 'on or before {extended_loan_due_date}'
+    and have the LLM see the resolved value at decision time."""
     from uxflows_runner.spec.loader import _index
     from uxflows_runner.spec.types import (
         Agent,
@@ -248,13 +206,15 @@ def test_take_exit_description_substitutes_session_variables():
         raw="{}",
     )
     plan = routing.plan(spec, "f", {}, has_caller=False)
-    tools = prompt_builder.build_tools(
-        spec, plan, {"extended_loan_due_date": "2026-06-12"}
+    prompt = prompt_builder.build_system_prompt(
+        spec,
+        main_flow,
+        lang="en-US",
+        variables={"extended_loan_due_date": "2026-06-12"},
+        plan=plan,
     )
-    take_tool = next(t for t in tools.standard_tools if t.name == "take_exit_path")
-    desc = take_tool.properties["exit_path_id"]["description"]
-    assert "on or before 2026-06-12" in desc
-    assert "{extended_loan_due_date}" not in desc
+    assert "on or before 2026-06-12" in prompt
+    assert "{extended_loan_due_date}" not in prompt
 
 
 def test_build_system_prompt_substitutes_across_multiple_sections(coffee):

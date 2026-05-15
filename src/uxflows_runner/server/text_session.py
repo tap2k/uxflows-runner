@@ -19,9 +19,7 @@ Mode-specific wiring this file owns:
 
 from __future__ import annotations
 
-import json
 import time
-import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -35,11 +33,11 @@ from pipecat.services.google.vertex.llm import GoogleVertexLLMService
 
 from uxflows_runner.config import Config
 from uxflows_runner.dispatcher.capabilities import CapabilityDispatcher
+from uxflows_runner.dispatcher import routing_protocol
 from uxflows_runner.dispatcher.processor import (
     add_capability_result_listener,
     apply_planned_shortcut,
-    apply_tool_call,
-    finalize_pending_end,
+    apply_route,
     plan_for_active_flow,
 )
 from uxflows_runner.dispatcher.prompt_builder import build_system_prompt
@@ -192,12 +190,16 @@ class TextSession:
     # ----- internals -----
 
     async def _run_one_turn(self) -> str:
-        """One inference + tool dispatch + optional follow-up inference.
+        """One inference + optional in-text routing + optional follow-up.
 
-        Mirrors the voice path's per-turn shape: PreLLMPlanner equivalent
-        (plan_for_active_flow), then inference, then any tool handler runs
-        synchronously via apply_tool_call, then optional follow-up for
-        interrupts/returns.
+        Shape:
+          1. plan_for_active_flow (builds system prompt incl. routing protocol)
+          2. _run_inference (returns full reply text — no tools)
+          3. find_tag → strip → return cleaned reply to caller
+          4. apply_route on the parsed tag (or apply_planned_shortcut if the
+             flow is a terminator and the LLM emitted no tag)
+          5. on interrupt / return into a callable: one follow-up inference
+             so the new flow's opener gets a chance to speak this turn
         """
         s = self.session
         if s.ended:
@@ -206,94 +208,51 @@ class TextSession:
         plan_for_active_flow(s)
         s.tool_handler_fired_this_turn = False
 
-        text, tool_calls = await self._run_inference()
-        self._append_assistant(text, tool_calls)
+        raw = await self._run_inference()
+        cleaned, tag = routing_protocol.find_tag(raw)
+        self._append_assistant(cleaned)
 
-        if not tool_calls:
-            # Terminator flow (only unconditional exits): fire its pre-resolved
-            # shortcut so it ends after speaking its line instead of looping.
+        if tag is None:
+            # No route tag — fire the planned shortcut if this is a
+            # single-unconditional-exit terminator flow. Otherwise stay.
             await apply_planned_shortcut(s)
-            finalize_pending_end(s)
-            return text
+            return cleaned
 
-        # In v0 the dispatcher emits at most one tool call per turn (one of
-        # take_exit_path / trigger_interrupt). Even if Gemini ever fires more,
-        # processing the first one wins — matches the precedence in
-        # routing.resolve.
-        first_call = tool_calls[0]
-        decision = await apply_tool_call(s, first_call["name"], first_call["args"])
-
-        # Append a tool-result message so follow-up inferences see a closed
-        # tool turn. Empty payload — the dispatcher's "result" is the state
-        # mutation it already applied.
-        self._append_tool_result(first_call["id"], first_call["name"])
+        decision = await apply_route(s, tag)
 
         if (
             decision is not None
             and decision.kind in ("trigger_interrupt", "return")
-            and not s.pending_end
-        ):
-            # Voice path pushes LLMRunFrame; text mode just calls inference
-            # again. plan_for_active_flow already ran inside apply_tool_call,
-            # so the new flow's prompt + tools are loaded.
-            s.tool_handler_fired_this_turn = False
-            followup_text, followup_calls = await self._run_inference()
-            self._append_assistant(followup_text, followup_calls)
-            # Follow-up tool calls (rare — would mean the new flow immediately
-            # routed off itself) get applied too. Don't recurse further.
-            if followup_calls:
-                fc = followup_calls[0]
-                await apply_tool_call(s, fc["name"], fc["args"])
-                self._append_tool_result(fc["id"], fc["name"])
-            finalize_pending_end(s)
-            return followup_text
-
-        # Silent take_exit / end follow-up: Gemini sometimes emits the tool
-        # call with no text part — the routing decision became the entire
-        # response. The state mutation is correct; the user just gets nothing
-        # to read. Issue ONE follow-up inference with tools DROPPED so the
-        # model can only produce text (no risk of chained transitions or
-        # premature cancel/confirm calls — see RUNNER-PLAN §"Live-test follow-up").
-        # For end decisions this fires against the source flow's still-loaded
-        # prompt (tear-down was deferred via s.pending_end). Capped at one
-        # follow-up per turn structurally — we don't recurse.
-        if (
-            decision is not None
-            and (decision.kind in ("take_exit", "end") or s.pending_end)
-            and not text
             and not s.ended
         ):
-            followup_text, _ = await self._run_inference(include_tools=False)
-            self._append_assistant(followup_text, [])
-            # If the new flow is a terminator, its planned shortcut hasn't
-            # fired yet — apply it now so we end in the same turn.
-            await apply_planned_shortcut(s)
-            finalize_pending_end(s)
-            return followup_text
+            # New flow is now active — give its opener a chance to speak.
+            # plan_for_active_flow already ran inside apply_route; the new
+            # flow's prompt (with its own routing protocol) is loaded.
+            s.tool_handler_fired_this_turn = False
+            followup_raw = await self._run_inference()
+            followup_cleaned, followup_tag = routing_protocol.find_tag(followup_raw)
+            self._append_assistant(followup_cleaned)
+            # Rare: the new flow itself routes off on its first turn. Honor
+            # it but don't recurse further.
+            if followup_tag is not None:
+                await apply_route(s, followup_tag)
+            return followup_cleaned
 
-        # The LLM produced text alongside the tool call — no follow-up needed.
-        # Still finalize any pending end (the source flow already spoke its
-        # closing line on this turn).
-        finalize_pending_end(s)
-        return text
+        return cleaned
 
-    async def _run_inference(
-        self, include_tools: bool = True
-    ) -> tuple[str, list[dict[str, Any]]]:
-        """One generate_content call. Returns (text, tool_calls) where
-        tool_calls is a list of {"id", "name", "args"} dicts in part order.
+    async def _run_inference(self) -> str:
+        """One generate_content call. Returns the model's full text output
+        (with any trailing `<route .../>` tag still present — caller strips).
 
-        `include_tools=False` forces text-only output — used by the silent
-        take_exit follow-up to guarantee the model produces words and can't
-        chain another routing decision.
+        No tools — routing is in-text via the route protocol described in
+        the system prompt.
         """
         adapter = GeminiLLMAdapter()
         params = adapter.get_llm_invocation_params(self.session.llm_context)
 
-        tools = params["tools"] if (include_tools and params["tools"]) else None
         gen_params = self.llm._build_generation_params(  # noqa: SLF001
             system_instruction=params["system_instruction"],
-            tools=tools,
+            tools=None,
         )
         # Match voice path: disable thinking on 2.5 Flash for low TTFT.
         gen_params["thinking_config"] = {"thinking_budget": 0}
@@ -305,57 +264,25 @@ class TextSession:
         )
 
         text_parts: list[str] = []
-        tool_calls: list[dict[str, Any]] = []
         if response.candidates and response.candidates[0].content:
             for part in response.candidates[0].content.parts or []:
                 if part.text:
                     text_parts.append(part.text)
-                if part.function_call:
-                    fc = part.function_call
-                    tool_calls.append(
-                        {
-                            "id": fc.id or uuid.uuid4().hex,
-                            "name": fc.name,
-                            "args": dict(fc.args) if fc.args else {},
-                        }
-                    )
 
-        return "".join(text_parts).strip(), tool_calls
+        return "".join(text_parts).strip()
 
-    def _append_assistant(self, text: str, tool_calls: list[dict[str, Any]]) -> None:
-        msg: dict[str, Any] = {"role": "assistant", "content": text}
-        if tool_calls:
-            msg["tool_calls"] = [
-                {
-                    "id": tc["id"],
-                    "type": "function",
-                    "function": {
-                        "name": tc["name"],
-                        "arguments": json.dumps(tc["args"]),
-                    },
-                }
-                for tc in tool_calls
-            ]
-        self.session.llm_context.add_message(msg)
+    def _append_assistant(self, text: str) -> None:
+        """Record the cleaned reply text (route tag already stripped) on the
+        conversation history AND emit a TurnCompleted event."""
+        self.session.llm_context.add_message(
+            {"role": "assistant", "content": text}
+        )
         if text:
             self.session.events.emit(
                 TurnCompleted(
                     session_id=self.session.session_id, role="agent", text=text
                 )
             )
-
-    def _append_tool_result(self, tool_call_id: str, tool_name: str) -> None:
-        # Empty {} payload — the dispatcher consumed the call, no return value
-        # to surface to the LLM. Including the message keeps the conversation
-        # history grammatical for any follow-up inference.
-        self.session.llm_context.add_message(
-            {
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "content": json.dumps({}),
-            }
-        )
-        logger.debug("text turn applied tool {} (id={})", tool_name, tool_call_id)
 
 
 class SessionAlreadyEnded(Exception):
