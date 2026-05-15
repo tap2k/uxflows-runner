@@ -21,7 +21,7 @@ def coffee():
 
 def test_system_prompt_contains_agent_and_flow_pieces(coffee):
     flow = coffee.flows_by_id["flow_greet"]
-    prompt = prompt_builder.build_system_prompt(coffee.agent, flow, lang="en-US")
+    prompt = prompt_builder.build_system_prompt(coffee, flow, lang="en-US")
 
     # Agent system prompt
     assert "barista at Bluebird Coffee" in prompt
@@ -46,7 +46,7 @@ def test_tools_includes_take_exit_and_trigger_interrupt_on_greet(coffee):
     """flow_greet now has all-llm exit conditions, plus a global interrupt.
     Both tools should appear in the per-turn schema."""
     plan = routing.plan(coffee, "flow_greet", {}, has_caller=False)
-    tools = prompt_builder.build_tools(plan)
+    tools = prompt_builder.build_tools(coffee, plan)
     assert tools is not None
     names = {t.name for t in tools.standard_tools}
     assert names == {"take_exit_path", "trigger_interrupt"}
@@ -54,7 +54,7 @@ def test_tools_includes_take_exit_and_trigger_interrupt_on_greet(coffee):
 
 def test_tools_includes_take_exit_path(coffee):
     plan = routing.plan(coffee, "flow_greet", {}, has_caller=False)
-    tools = prompt_builder.build_tools(plan)
+    tools = prompt_builder.build_tools(coffee, plan)
     assert tools is not None
     names = {t.name for t in tools.standard_tools}
     assert "take_exit_path" in names
@@ -62,7 +62,7 @@ def test_tools_includes_take_exit_path(coffee):
 
 def test_tools_includes_trigger_interrupt_when_applicable(coffee):
     plan = routing.plan(coffee, "flow_coffee_order", {}, has_caller=False)
-    tools = prompt_builder.build_tools(plan)
+    tools = prompt_builder.build_tools(coffee, plan)
     assert tools is not None
     names = {t.name for t in tools.standard_tools}
     assert "trigger_interrupt" in names
@@ -75,7 +75,7 @@ def test_take_exit_path_enum_includes_only_llm_paths(coffee):
     """flow_coffee_order has two llm exits (xp_co_to_confirm, xp_co_cancel)
     and no calc-shortcut on an empty bag. Both should be in the enum."""
     plan = routing.plan(coffee, "flow_coffee_order", {}, has_caller=False)
-    tools = prompt_builder.build_tools(plan)
+    tools = prompt_builder.build_tools(coffee, plan)
     take_tool = next(t for t in tools.standard_tools if t.name == "take_exit_path")
     enum = take_tool.properties["exit_path_id"]["enum"]
     assert set(enum) == {"xp_co_to_confirm", "xp_co_cancel"}
@@ -85,7 +85,7 @@ def test_take_exit_tool_inside_interrupt_offers_return(coffee):
     """Inside int_menu, the only exit is a `goto: RETURN` — surfaced as an
     LLM-driven take_exit_path candidate so the LLM picks when to return."""
     plan = routing.plan(coffee, "int_menu", {}, has_caller=True)
-    tools = prompt_builder.build_tools(plan)
+    tools = prompt_builder.build_tools(coffee, plan)
     assert tools is not None
     take_tool = next(t for t in tools.standard_tools if t.name == "take_exit_path")
     assert take_tool.properties["exit_path_id"]["enum"] == ["xp_int_menu_return"]
@@ -124,19 +124,21 @@ def test_return_path_without_condition_falls_back_to_default():
     )
     loaded = _index(spec, raw='{}')
     plan = routing.plan(loaded, "int_q", {}, has_caller=True)
-    tools = prompt_builder.build_tools(plan)
+    tools = prompt_builder.build_tools(loaded, plan)
     take_tool = next(t for t in tools.standard_tools if t.name == "take_exit_path")
     desc = take_tool.properties["exit_path_id"]["description"]
     assert "Return to the previous flow" in desc
 
 
 def test_per_language_faq_used():
+    from uxflows_runner.spec.loader import _index
     from uxflows_runner.spec.types import (
         Agent,
         AgentKnowledge,
         AgentMeta,
         FAQEntry,
         Flow,
+        Spec,
     )
 
     agent = Agent(
@@ -155,8 +157,9 @@ def test_per_language_faq_used():
         entry_flow_id="f",
     )
     flow = Flow(id="f", type="happy")
-    es = prompt_builder.build_system_prompt(agent, flow, lang="es-ES")
-    en = prompt_builder.build_system_prompt(agent, flow, lang="en-US")
+    spec = _index(Spec(agent=agent, flows=[flow]), raw="{}")
+    es = prompt_builder.build_system_prompt(spec, flow, lang="es-ES")
+    en = prompt_builder.build_system_prompt(spec, flow, lang="en-US")
     assert "abierto de 9 a 17" in es
     assert "open 9-5" in en
     assert "abierto" not in en
@@ -246,7 +249,7 @@ def test_take_exit_description_substitutes_session_variables():
     )
     plan = routing.plan(spec, "f", {}, has_caller=False)
     tools = prompt_builder.build_tools(
-        plan, {"extended_loan_due_date": "2026-06-12"}
+        spec, plan, {"extended_loan_due_date": "2026-06-12"}
     )
     take_tool = next(t for t in tools.standard_tools if t.name == "take_exit_path")
     desc = take_tool.properties["exit_path_id"]["description"]
@@ -258,11 +261,13 @@ def test_build_system_prompt_substitutes_across_multiple_sections(coffee):
     """Variables seeded into the variable bag get substituted in agent.system_prompt
     AND flow.scripts AND any other composed section. Verifies the substitution
     runs as a final pass over the joined prompt, not per-section."""
+    from uxflows_runner.spec.loader import _index
     from uxflows_runner.spec.types import (
         Agent,
         AgentMeta,
         Flow,
         Script,
+        Spec,
     )
 
     agent = Agent(
@@ -279,9 +284,10 @@ def test_build_system_prompt_substitutes_across_multiple_sections(coffee):
         instructions="Greet {customer_name} warmly.",
         scripts=[Script(id="s_welcome", text="Welcome, {customer_name}!")],
     )
+    spec = _index(Spec(agent=agent, flows=[flow]), raw="{}")
 
     prompt = prompt_builder.build_system_prompt(
-        agent, flow, lang="en-US", variables={"customer_name": "Maria"}
+        spec, flow, lang="en-US", variables={"customer_name": "Maria"}
     )
     assert "helping Maria" in prompt
     assert "Greet Maria warmly" in prompt

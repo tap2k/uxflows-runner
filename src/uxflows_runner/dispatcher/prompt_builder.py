@@ -35,12 +35,14 @@ from typing import Any
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 
+from uxflows_runner.spec.loader import LoadedSpec
 from uxflows_runner.spec.types import (
-    Agent,
     ExitPath,
     Flow,
     LocalizedString,
     default_language,
+    is_end_goto,
+    is_flow_goto,
     is_return_goto,
     resolve_localized,
 )
@@ -79,13 +81,14 @@ def _resolve(value: LocalizedString | None, lang: str | None, default_lang: str)
 
 
 def build_system_prompt(
-    agent: Agent,
+    spec: LoadedSpec,
     flow: Flow,
     lang: str | None,
     variables: dict[str, Any] | None = None,
 ) -> str:
     """`lang=None` means "use the agent's default language" — translatable
     fields resolve to the default-language string."""
+    agent = spec.agent
     default_lang = default_language(agent.meta.languages)
     sections: list[str] = []
 
@@ -177,6 +180,7 @@ def build_system_prompt(
 
 
 def build_tools(
+    spec: LoadedSpec,
     plan: RoutingPlan,
     variables: dict[str, Any] | None = None,
 ) -> ToolsSchema | None:
@@ -190,11 +194,17 @@ def build_tools(
     spec author can write a routing gate like
       "customer's committed date is on or before {extended_loan_due_date}"
     and the LLM sees the resolved value at decision time.
+
+    Each exit's tool description appends the destination flow's name —
+    "where does this path go?" context, not just "when should it fire?".
+    Name is the only narrative handle v0 exposes (no flow `description` /
+    `purpose` field), so authors should write names that read like outcomes
+    (e.g. "Wrong Number Probe").
     """
     declarations: list[FunctionSchema] = []
 
     if plan.llm_exit_paths:
-        declarations.append(_take_exit_path_schema(plan, variables))
+        declarations.append(_take_exit_path_schema(spec, plan, variables))
 
     if plan.llm_interrupts:
         declarations.append(_trigger_interrupt_schema(plan, variables))
@@ -205,12 +215,14 @@ def build_tools(
 
 
 def _take_exit_path_schema(
+    spec: LoadedSpec,
     plan: RoutingPlan,
     variables: dict[str, Any] | None,
 ) -> FunctionSchema:
     exit_ids = [ep.id for ep in plan.llm_exit_paths]
     descriptions = "\n".join(
         f"- {ep.id}: {substitute_variables(_exit_path_intent(ep), variables)}"
+        f" → {_exit_destination(ep, spec.flows_by_id)}"
         for ep in plan.llm_exit_paths
     )
 
@@ -254,6 +266,24 @@ def _take_exit_path_schema(
         properties=properties,
         required=["exit_path_id"],
     )
+
+
+def _exit_destination(ep: ExitPath, flows_by_id: dict[str, Flow] | None) -> str:
+    """Render the exit's destination as a short phrase for the tool enum.
+
+    Forward-flow gotos resolve to the target flow's `name` (falling back to
+    `id` if name is unset). END / RETURN render as fixed strings.
+    """
+    if is_end_goto(ep.goto):
+        return "end the conversation"
+    if is_return_goto(ep.goto):
+        return "return to the calling flow"
+    assert is_flow_goto(ep.goto)
+    if flows_by_id is not None:
+        target = flows_by_id.get(ep.goto)
+        if target is not None:
+            return target.name or target.id
+    return ep.goto
 
 
 def _exit_path_intent(ep: ExitPath) -> str:

@@ -113,7 +113,7 @@ async def run_session(
         session.state.variables.update(context_vars)
 
     initial_prompt = build_system_prompt(
-        spec.agent, entry_flow, lang, variables=session.state.variables
+        spec, entry_flow, lang, variables=session.state.variables
     )
     context.messages[0]["content"] = initial_prompt
 
