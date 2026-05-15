@@ -220,9 +220,7 @@ def _render_routing_protocol(
     parts.append(
         'Format: <route exit="EXIT_ID" />  or  <route interrupt="INTERRUPT_ID" />\n'
         'Example: Got it, I will send that now. <route exit="xp_send" />\n'
-        "Place the tag at the end of your reply. Always speak to the user "
-        "before the tag — even one sentence. The tag is a routing signal, "
-        "never a substitute for replying. Omit it if no condition matches."
+        "Place the tag at the end of your reply. Omit it if no condition matches."
     )
     return "\n\n".join(parts)
 
