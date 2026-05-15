@@ -198,8 +198,17 @@ class TextSession:
           3. find_tag → strip → return cleaned reply to caller
           4. apply_route on the parsed tag (or apply_planned_shortcut if the
              flow is a terminator and the LLM emitted no tag)
-          5. on interrupt / return into a callable: one follow-up inference
-             so the new flow's opener gets a chance to speak this turn
+          5. follow-up inference rules:
+             - interrupt or return-into-caller: ALWAYS follow up. The
+               destination owns the substantive response to this turn.
+             - take_exit with empty reply text: follow up. The source flow
+               judged it had nothing to say (the user's message was
+               topic-shifted); let the destination's prompt speak instead
+               of forcing the source to improvise.
+             - take_exit with non-empty reply: no follow-up. The source
+               flow already responded; the destination's opener fires on
+               the next user turn.
+             - end / stay: no follow-up.
         """
         s = self.session
         if s.ended:
@@ -219,26 +228,28 @@ class TextSession:
             return cleaned
 
         decision = await apply_route(s, tag)
+        if decision is None or s.ended:
+            return cleaned
 
-        if (
-            decision is not None
-            and decision.kind in ("trigger_interrupt", "return")
-            and not s.ended
-        ):
-            # New flow is now active — give its opener a chance to speak.
-            # plan_for_active_flow already ran inside apply_route; the new
-            # flow's prompt (with its own routing protocol) is loaded.
-            s.tool_handler_fired_this_turn = False
-            followup_raw = await self._run_inference()
-            followup_cleaned, followup_tag = routing_protocol.find_tag(followup_raw)
-            self._append_assistant(followup_cleaned)
-            # Rare: the new flow itself routes off on its first turn. Honor
-            # it but don't recurse further.
-            if followup_tag is not None:
-                await apply_route(s, followup_tag)
-            return followup_cleaned
+        needs_followup = (
+            decision.kind in ("trigger_interrupt", "return")
+            or (decision.kind == "take_exit" and not cleaned.strip())
+        )
+        if not needs_followup:
+            return cleaned
 
-        return cleaned
+        # New flow is now active — give its opener a chance to speak.
+        # plan_for_active_flow already ran inside apply_route; the new
+        # flow's prompt (with its own routing protocol) is loaded.
+        s.tool_handler_fired_this_turn = False
+        followup_raw = await self._run_inference()
+        followup_cleaned, followup_tag = routing_protocol.find_tag(followup_raw)
+        self._append_assistant(followup_cleaned)
+        # Rare: the new flow itself routes off on its first turn. Honor
+        # it but don't recurse further.
+        if followup_tag is not None:
+            await apply_route(s, followup_tag)
+        return followup_cleaned
 
     async def _run_inference(self) -> str:
         """One generate_content call. Returns the model's full text output

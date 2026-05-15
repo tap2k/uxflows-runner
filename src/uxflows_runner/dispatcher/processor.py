@@ -42,6 +42,7 @@ from pipecat.frames.frames import (
     Frame,
     LLMContextFrame,
     LLMFullResponseEndFrame,
+    LLMRunFrame,
     LLMTextFrame,
     TranscriptionFrame,
 )
@@ -170,10 +171,29 @@ class RouteTagFrameProcessor(FrameProcessor):
                 # have streamed past so TTS gets the closing line before
                 # any session tear-down.
                 tag = self._captured_tag
+                spoken_was_empty = not "".join(self._spoken).strip()
                 self._spoken.clear()
                 self._captured_tag = None
                 if tag is not None:
-                    await apply_route(self._session, tag)
+                    decision = await apply_route(self._session, tag)
+                    # Follow-up inference rules (mirror text mode):
+                    # - interrupt / return-into-caller → ALWAYS follow up.
+                    # - silent take_exit (no reply text) → follow up so the
+                    #   destination speaks instead of leaving dead air.
+                    # - take_exit with reply / end / stay → no follow-up.
+                    if decision is not None and not self._session.ended:
+                        needs_followup = (
+                            decision.kind in ("trigger_interrupt", "return")
+                            or (decision.kind == "take_exit" and spoken_was_empty)
+                        )
+                        if needs_followup:
+                            # Push UPSTREAM so the LLM service (which sits
+                            # above this processor in the pipeline) sees the
+                            # frame and runs another inference against the
+                            # newly-loaded destination prompt.
+                            await self.push_frame(
+                                LLMRunFrame(), FrameDirection.UPSTREAM
+                            )
         await self.push_frame(frame, direction)
 
     def _consume_text(self, chunk: str) -> str:
@@ -410,8 +430,10 @@ async def apply_route(
     decision = routing_mod.resolve(s.current_plan, s.spec, llm_results)
     await _apply_decision(decision, s, llm_results=llm_results)
 
-    if decision.kind in ("trigger_interrupt", "return"):
-        # Re-plan for the new active flow before its first turn fires.
+    if decision.kind in ("take_exit", "trigger_interrupt", "return"):
+        # Re-plan for the new active flow. The next inference (whether it's
+        # an immediate silent-take_exit follow-up or the next user turn)
+        # needs the destination flow's prompt + routing protocol loaded.
         plan_for_active_flow(s)
 
     return decision
