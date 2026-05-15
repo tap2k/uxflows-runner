@@ -179,14 +179,6 @@ def build_system_prompt(
             + "\n".join(bucket_lines)
         )
 
-    # Trailing reminder so the protocol stays salient even after a long
-    # agent.system_prompt + guardrails + flow.instructions wall. Models
-    # weight the tail of the prompt heavily.
-    if plan is not None:
-        reminder = _render_routing_reminder(plan)
-        if reminder:
-            sections.append(reminder)
-
     return substitute_variables("\n\n".join(sections), variables)
 
 
@@ -212,66 +204,25 @@ def _render_routing_protocol(
     if not exit_lines and not interrupt_lines:
         return ""
 
-    parts = [
-        "# ROUTING PROTOCOL (load-bearing — read this first)\n\n"
-        "Every response you produce is BOTH a conversational reply AND a "
-        "routing decision. You are running inside a flow graph; the "
-        "conversation cannot advance to the next flow without an explicit "
-        "route tag from you.\n\n"
-        "RULES:\n"
-        "1. When the user's latest message satisfies any exit condition "
-        "below, you MUST end your reply with the matching `<route .../>` "
-        "tag. No tag = stuck in this flow forever = broken UX.\n"
-        "2. This applies even when you've just spoken what feels like a "
-        "closing line (\"have a great day\", \"contact support if you have "
-        "issues\", etc.). The closing line is YOUR text; the tag is what "
-        "tells the runtime the flow is over. Without the tag, the runtime "
-        "asks you to keep talking. Always emit the tag.\n"
-        "3. When NO exit condition matches, omit the tag and keep talking. "
-        "The tag must be the LAST thing in your response — never put text "
-        "after it."
-    ]
+    # Minimal contract — format + candidates + a single example. Prior
+    # versions had multi-paragraph directives ("EVERY response is BOTH a
+    # reply AND a routing decision...") and the prose leaked into the
+    # agent's voice: the model wrote sign-offs and closings mid-flow
+    # because the protocol was framing every turn as a decision. Brevity
+    # restores the model's authored voice while still emitting the tag.
+    parts = ["After your reply, emit a route tag if a condition below is met."]
     if exit_lines:
         parts.append(
-            f"Exits from `{plan.active_flow.id}` (active flow):\n"
-            + "\n".join(exit_lines)
+            f"Exits from {plan.active_flow.id}:\n" + "\n".join(exit_lines)
         )
     if interrupt_lines:
-        parts.append(
-            "Interrupts (fire when the trigger matches the user's latest "
-            "message, regardless of which flow is active):\n"
-            + "\n".join(interrupt_lines)
-        )
+        parts.append("Interrupts:\n" + "\n".join(interrupt_lines))
     parts.append(
-        "Tag format (self-closing, double-quoted attribute values):\n"
-        '  <route exit="EXIT_ID" />                 — take a flow exit\n'
-        '  <route exit="EXIT_ID" varname="value" /> — take with a capture\n'
-        '  <route interrupt="INTERRUPT_ID" />       — fire an interrupt\n\n'
-        "Examples:\n"
-        '  Got it, I will send that now. <route exit="xp_send_confirmation" />\n'
-        "  Thanks for letting me know. Please contact support if you "
-        'believe this is an error. Have a great day. <route exit="xp_wrong_caller" />\n'
-        '  Sorry — let me check that for you. <route interrupt="int_lookup" />'
+        'Format: <route exit="EXIT_ID" />  or  <route interrupt="INTERRUPT_ID" />\n'
+        'Example: Got it, I will send that now. <route exit="xp_send" />\n'
+        "Place the tag at the end of your reply. Omit it if no condition matches."
     )
     return "\n\n".join(parts)
-
-
-def _render_routing_reminder(plan: "RoutingPlan") -> str:
-    """Short reminder appended at the end of the system prompt so the model
-    sees the routing requirement most recently — the long body of agent +
-    flow instructions can otherwise drown out the protocol section's
-    authority by the time the model is ready to respond."""
-    exit_ids = [ep.id for ep in plan.llm_exit_paths]
-    interrupt_ids = [f.id for f in plan.llm_interrupts]
-    if not exit_ids and not interrupt_ids:
-        return ""
-    available = exit_ids + interrupt_ids
-    return (
-        "REMINDER — your reply must end with a route tag if any of these "
-        f"conditions has been reached: {', '.join(available)}. See the "
-        "ROUTING PROTOCOL section at the top of this prompt for tag "
-        "format. If no condition matches, omit the tag and keep talking."
-    )
 
 
 def _exit_destination(ep: ExitPath, flows_by_id: dict[str, Flow] | None) -> str:

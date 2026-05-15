@@ -49,7 +49,7 @@ def test_routing_protocol_lists_exits_and_interrupts_on_greet(coffee):
     flow = coffee.flows_by_id["flow_greet"]
     plan = routing.plan(coffee, "flow_greet", {}, has_caller=False)
     prompt = prompt_builder.build_system_prompt(coffee, flow, lang="en-US", plan=plan)
-    assert "ROUTING PROTOCOL" in prompt
+    assert "emit a route tag" in prompt
     assert "xp_greet_to_coffee" in prompt
     assert "xp_greet_to_tea" in prompt
     assert "xp_greet_walkaway" in prompt
@@ -61,7 +61,7 @@ def test_routing_protocol_omitted_when_no_plan(coffee):
     LLM just talks until the first turn produces a plan."""
     flow = coffee.flows_by_id["flow_greet"]
     prompt = prompt_builder.build_system_prompt(coffee, flow, lang="en-US")
-    assert "ROUTING PROTOCOL" not in prompt
+    assert "emit a route tag" not in prompt
 
 
 def test_routing_protocol_inside_interrupt_offers_return(coffee):
