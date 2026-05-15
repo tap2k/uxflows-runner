@@ -35,11 +35,11 @@ class Session:
     llm_context: "LLMContext"
     session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     current_plan: "RoutingPlan | None" = None
+    # True once apply_route has fired this turn — PostLLMResolver uses this
+    # to know whether to fall through to apply_planned_shortcut. Reset by
+    # PreLLMPlanner at the start of each turn.
     tool_handler_fired_this_turn: bool = False
-    text_emitted_this_turn: bool = False
-    skip_next_planning: bool = False
     ended: bool = False
-    pending_end: bool = False
 
     @classmethod
     def start(

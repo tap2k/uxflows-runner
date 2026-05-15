@@ -1,6 +1,8 @@
-"""Compose the per-flow system prompt and the per-turn tool schema.
+"""Compose the per-flow system prompt — agent + flow sections plus the
+in-text routing protocol that lists this turn's available exits and
+interrupts.
 
-System prompt (RUNNER-PLAN §"v0 dispatcher feature scope"):
+Layout:
   agent.system_prompt
   + agent.guardrails (Operating principles)
   + agent.knowledge.faq (Frequently asked)
@@ -9,31 +11,25 @@ System prompt (RUNNER-PLAN §"v0 dispatcher feature scope"):
   + flow.guardrails
   + flow.knowledge.faq
   + flow.scripts (sample lines for the active language)
+  + Routing protocol (exits + interrupts available this turn, format,
+    one-shot example) — only when a RoutingPlan is supplied.
 
 Translatable fields (`system_prompt`, `guardrail.statement`, `faq.answer`,
 `glossary.definition`, `flow.instructions`, `script.text`) are all
-LocalizedString — resolved through `resolve_localized` against the session's
-active language with fallback to the agent's default language.
+LocalizedString — resolved through `resolve_localized` against the
+session's active language with fallback to the agent's default language.
 
-Tool schema (RUNNER-PLAN §"Gemini tool-call shape"):
-  - One `take_exit_path` FunctionSchema with an `exit_path_id` parameter
-    enumerated over the LLM-method exit paths in the routing plan, plus
-    one parameter per llm-method assign on those exit paths (string-typed;
-    typed-parameter v0.5).
-  - One `trigger_interrupt` FunctionSchema (only when interrupts are
-    applicable on this turn), with `interrupt_flow_id` enum.
-
-Both are emitted via Pipecat's provider-neutral `FunctionSchema` /
-`ToolsSchema`; provider adapters in pipecat-ai translate to Gemini's format.
+Routing protocol (instead of tool calls): the LLM emits a self-closing
+`<route ... />` tag at the end of its reply. The streaming stripper
+(voice) / response splitter (text) parses it post-emission and feeds it
+to the dispatcher via `apply_route`. See `routing_protocol.py` for the
+wire format.
 """
 
 from __future__ import annotations
 
 import re
 from typing import Any
-
-from pipecat.adapters.schemas.function_schema import FunctionSchema
-from pipecat.adapters.schemas.tools_schema import ToolsSchema
 
 from uxflows_runner.spec.loader import LoadedSpec
 from uxflows_runner.spec.types import (
@@ -85,12 +81,31 @@ def build_system_prompt(
     flow: Flow,
     lang: str | None,
     variables: dict[str, Any] | None = None,
+    plan: "RoutingPlan | None" = None,
 ) -> str:
     """`lang=None` means "use the agent's default language" — translatable
-    fields resolve to the default-language string."""
+    fields resolve to the default-language string.
+
+    `plan` is the routing plan for the current turn — used to render the
+    in-text routing protocol section so the LLM sees the exits + interrupts
+    available *this turn* (after calc shortcuts evaluate, RETURN visibility,
+    nested-interrupt filtering). Omit at session start; the protocol section
+    is skipped and the LLM just talks.
+    """
     agent = spec.agent
     default_lang = default_language(agent.meta.languages)
     sections: list[str] = []
+
+    # In-text routing protocol goes FIRST — above the agent's system_prompt.
+    # The model treats top-of-prompt as load-bearing structure; if the
+    # protocol lands at the bottom of a 20k-character prompt it gets read
+    # as a footnote and the model fluently improvises off-path. We saw this
+    # against the Tala spec: long agent.system_prompt + the protocol at the
+    # tail produced zero route tags across a 15-turn session.
+    if plan is not None:
+        routing_section = _render_routing_protocol(spec, plan, variables)
+        if routing_section:
+            sections.append(routing_section)
 
     sp = _resolve(agent.system_prompt, lang, default_lang)
     if sp:
@@ -164,108 +179,50 @@ def build_system_prompt(
             + "\n".join(bucket_lines)
         )
 
-    # Two short tool-use reminders. Both compensate for Gemini behaviors we
-    # observed during live testing: (1) AUTO mode sometimes emits a tool call
-    # alone, leaving the patron in silence; (2) when tools are present, the
-    # model can over-index on "I should be calling one" and stall on
-    # off-path questions that have no matching tool. Resist adding a third —
-    # that's the signal the prompt structure needs refactoring.
-    sections.append(
-        "Always speak naturally to the patron when calling a tool — they hear "
-        "your reply, not the tool call. You can also answer without calling "
-        "any tool; call tools only when their description fits."
-    )
-
     return substitute_variables("\n\n".join(sections), variables)
 
 
-def build_tools(
+def _render_routing_protocol(
     spec: LoadedSpec,
-    plan: RoutingPlan,
-    variables: dict[str, Any] | None = None,
-) -> ToolsSchema | None:
-    """Return the per-turn tool schema, or None when there's no LLM routing
-    work to do this turn (the caller can skip `tools` entirely on the LLM
-    call to save tokens). When None, the LLM still produces text — it just
-    has no routing decisions to emit.
-
-    `variables` are substituted into `{key}` placeholders inside each rendered
-    condition expression before it's inlined into a tool description — so a
-    spec author can write a routing gate like
-      "customer's committed date is on or before {extended_loan_due_date}"
-    and the LLM sees the resolved value at decision time.
-
-    Each exit's tool description appends the destination flow's name —
-    "where does this path go?" context, not just "when should it fire?".
-    Name is the only narrative handle v0 exposes (no flow `description` /
-    `purpose` field), so authors should write names that read like outcomes
-    (e.g. "Wrong Number Probe").
-    """
-    declarations: list[FunctionSchema] = []
-
-    if plan.llm_exit_paths:
-        declarations.append(_take_exit_path_schema(spec, plan, variables))
-
-    if plan.llm_interrupts:
-        declarations.append(_trigger_interrupt_schema(plan, variables))
-
-    if not declarations:
-        return None
-    return ToolsSchema(standard_tools=declarations)
-
-
-def _take_exit_path_schema(
-    spec: LoadedSpec,
-    plan: RoutingPlan,
+    plan: "RoutingPlan",
     variables: dict[str, Any] | None,
-) -> FunctionSchema:
-    exit_ids = [ep.id for ep in plan.llm_exit_paths]
-    descriptions = "\n".join(
-        f"- {ep.id}: {substitute_variables(_exit_path_intent(ep), variables)}"
-        f" → {_exit_destination(ep, spec.flows_by_id)}"
-        for ep in plan.llm_exit_paths
-    )
-
-    properties: dict[str, dict] = {
-        "exit_path_id": {
-            "type": "string",
-            "enum": exit_ids,
-            "description": (
-                "Pick the exit path that matches the patron's current state. "
-                "Choose only when the conversation has clearly reached one of "
-                "these conditions; otherwise keep talking and don't call this "
-                "tool.\n\nAvailable exit paths:\n" + descriptions
-            ),
-        }
-    }
-
-    # Per-exit-path llm-method assigns become parameters. Multiple exit paths
-    # may assign to the same variable; we union their declarations into one
-    # parameter (LLM picks one exit_path_id and supplies the relevant ones).
-    seen_assign_vars: dict[str, str] = {}  # var -> description
+) -> str:
+    """Render the routing-protocol section: exits + interrupts available
+    this turn, format, and a one-shot example. Empty string when there's
+    nothing to route on (the LLM should just talk)."""
+    exit_lines: list[str] = []
     for ep in plan.llm_exit_paths:
-        for var, assign in ep.assigns.items():
-            if assign.method != "llm":
-                continue
-            if var not in seen_assign_vars:
-                seen_assign_vars[var] = (
-                    f"Captured value for `{var}` when taking exit_path_id={ep.id}. "
-                    "Omit if not relevant to the chosen exit."
-                )
+        intent = substitute_variables(_exit_path_intent(ep), variables)
+        dest = _exit_destination(ep, spec.flows_by_id)
+        exit_lines.append(f"- {ep.id} (→ {dest}): {intent}")
 
-    for var, desc in seen_assign_vars.items():
-        properties[var] = {"type": "string", "description": desc}
+    interrupt_lines: list[str] = []
+    for f in plan.llm_interrupts:
+        trigger = substitute_variables(_interrupt_intent(f), variables)
+        interrupt_lines.append(f"- {f.id}: {trigger}")
 
-    return FunctionSchema(
-        name="take_exit_path",
-        description=(
-            f"Route out of the current flow ({plan.active_flow.id}) onto one of "
-            "its declared exit paths. Call this on the same turn as your spoken "
-            "reply, when the conversation has reached the exit condition."
-        ),
-        properties=properties,
-        required=["exit_path_id"],
+    if not exit_lines and not interrupt_lines:
+        return ""
+
+    # Minimal contract — format + candidates + a single example. Prior
+    # versions had multi-paragraph directives ("EVERY response is BOTH a
+    # reply AND a routing decision...") and the prose leaked into the
+    # agent's voice: the model wrote sign-offs and closings mid-flow
+    # because the protocol was framing every turn as a decision. Brevity
+    # restores the model's authored voice while still emitting the tag.
+    parts = ["After your reply, emit a route tag if a condition below is met."]
+    if exit_lines:
+        parts.append(
+            f"Exits from {plan.active_flow.id}:\n" + "\n".join(exit_lines)
+        )
+    if interrupt_lines:
+        parts.append("Interrupts:\n" + "\n".join(interrupt_lines))
+    parts.append(
+        'Format: <route exit="EXIT_ID" />  or  <route interrupt="INTERRUPT_ID" />\n'
+        'Example: Got it, I will send that now. <route exit="xp_send" />\n'
+        "Place the tag at the end of your reply. Omit it if no condition matches."
     )
+    return "\n\n".join(parts)
 
 
 def _exit_destination(ep: ExitPath, flows_by_id: dict[str, Flow] | None) -> str:
@@ -311,33 +268,6 @@ def _interrupt_intent(f: Flow) -> str:
     if f.entry_condition is not None:
         return f.entry_condition.expression
     return f.name or f.id
-
-
-def _trigger_interrupt_schema(
-    plan: RoutingPlan,
-    variables: dict[str, Any] | None,
-) -> FunctionSchema:
-    interrupt_ids = [f.id for f in plan.llm_interrupts]
-    descriptions = "\n".join(
-        f"- {f.id}: {substitute_variables(_interrupt_intent(f), variables)}"
-        for f in plan.llm_interrupts
-    )
-    return FunctionSchema(
-        name="trigger_interrupt",
-        description=(
-            "Trigger an interrupt flow because the patron asked something off "
-            "the current routing path. Speak the answer naturally in the same "
-            "response. Available interrupts:\n" + descriptions
-        ),
-        properties={
-            "interrupt_flow_id": {
-                "type": "string",
-                "enum": interrupt_ids,
-                "description": "Which interrupt to fire.",
-            }
-        },
-        required=["interrupt_flow_id"],
-    )
 
 
 def _format_faq(entries, lang: str | None, default_lang: str) -> str:

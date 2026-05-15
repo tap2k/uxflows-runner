@@ -371,11 +371,8 @@ async def test_callable_utility_flow_pushes_call_frame():
 @pytest.mark.asyncio
 async def test_return_at_top_level_collapses_to_end():
     """Per schema: RETURN from a top-level frame (nothing to pop) behaves as
-    END. Tear-down is deferred (s.pending_end) so the source flow's prompt
-    stays loaded for a silent closing utterance; finalize_pending_end
-    completes the tear-down at turn-end."""
-    from uxflows_runner.dispatcher.processor import finalize_pending_end
-
+    END. In-text routing tears down immediately (the closing line streamed
+    before the route tag, so no defer is needed)."""
     main = Flow(
         id="flow_a",
         type="happy",
@@ -389,10 +386,5 @@ async def test_return_at_top_level_collapses_to_end():
     decision = routing._build_take_exit(main, main.exit_paths[0])
     assert decision.kind == "return"
     await _apply_decision(decision, s)
-    # Deferred: the routing event fired but the session hasn't ended yet.
-    assert not s.ended
-    assert s.pending_end
-    # Finalizer completes the tear-down.
-    assert finalize_pending_end(s)
     assert s.ended
     assert s.state.stack == []
