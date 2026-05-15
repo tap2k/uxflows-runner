@@ -245,12 +245,12 @@ button.link:hover:not(:disabled) {
   cursor: pointer;
   padding: 8px 12px;
   font-size: 13px;
-  color: var(--muted, #888);
+  color: var(--muted);
   user-select: none;
 }
 
 .context-vars summary:hover {
-  color: var(--fg, #222);
+  color: var(--fg);
 }
 
 .context-vars textarea {
@@ -260,6 +260,7 @@ button.link:hover:not(:disabled) {
   border-top: 1px solid var(--border);
   border-radius: 0 0 6px 6px;
   background: transparent;
+  color: var(--fg);
   padding: 10px 12px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
@@ -268,17 +269,23 @@ button.link:hover:not(:disabled) {
   outline: none;
 }
 
+.context-vars textarea::placeholder {
+  color: var(--muted);
+  opacity: 0.6;
+}
+
 .context-vars-hint {
   margin: 0;
   padding: 6px 12px 10px;
   font-size: 12px;
-  color: var(--muted, #888);
+  color: var(--muted);
 }
 
 .context-vars-hint code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
-  background: rgba(0,0,0,0.05);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--fg);
   padding: 1px 4px;
   border-radius: 3px;
 }
