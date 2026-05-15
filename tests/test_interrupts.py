@@ -370,7 +370,12 @@ async def test_callable_utility_flow_pushes_call_frame():
 
 @pytest.mark.asyncio
 async def test_return_at_top_level_collapses_to_end():
-    """Per schema: RETURN from a top-level frame (nothing to pop) behaves as END."""
+    """Per schema: RETURN from a top-level frame (nothing to pop) behaves as
+    END. Tear-down is deferred (s.pending_end) so the source flow's prompt
+    stays loaded for a silent closing utterance; finalize_pending_end
+    completes the tear-down at turn-end."""
+    from uxflows_runner.dispatcher.processor import finalize_pending_end
+
     main = Flow(
         id="flow_a",
         type="happy",
@@ -381,12 +386,13 @@ async def test_return_at_top_level_collapses_to_end():
 
     plan = routing.plan(spec, "flow_a", {}, has_caller=False)
     s.current_plan = plan
-    # The plan filters RETURN exits when not in an interrupt frame; we can
-    # still build a Decision directly and verify _apply_decision treats it
-    # as terminal (the schema guarantee that any future top-level RETURN
-    # behaves as END).
     decision = routing._build_take_exit(main, main.exit_paths[0])
     assert decision.kind == "return"
     await _apply_decision(decision, s)
+    # Deferred: the routing event fired but the session hasn't ended yet.
+    assert not s.ended
+    assert s.pending_end
+    # Finalizer completes the tear-down.
+    assert finalize_pending_end(s)
     assert s.ended
     assert s.state.stack == []

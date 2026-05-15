@@ -251,18 +251,22 @@ async def test_silent_take_exit_triggers_no_tools_followup(coffee_spec, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_silent_terminal_take_exit_does_not_trigger_followup(
+async def test_silent_terminal_take_exit_speaks_closing_line_then_ends(
     coffee_spec, monkeypatch
 ):
-    """If the silent take_exit was a terminal exit, the session ended; we
-    should NOT do a follow-up — there's no flow left to speak from."""
+    """A silent terminal exit defers session tear-down (s.pending_end) so the
+    source flow can still speak its closing line. The runner issues one
+    tools-cleared follow-up inference, then finalize_pending_end completes
+    the tear-down. Without this deferral, terminator flows go out silently —
+    the bug that produced the Tala wrong-number infinite loop."""
     calls: list[bool] = []
 
     script = [
         ("Welcome!", []),
         # Walkaway exit — terminal, ends the session
         ("", [_tc("take_exit_path", {"exit_path_id": "xp_greet_walkaway"})]),
-        # No third call should happen
+        # Silent follow-up speaks the closing line in the source flow's voice
+        ("Bye, come back anytime!", []),
     ]
     queue = list(script)
 
@@ -276,8 +280,9 @@ async def test_silent_terminal_take_exit_does_not_trigger_followup(
     ts.drain_events()
 
     reply = await ts.turn("nevermind")
-    assert reply == ""  # silent terminal — accepted, no follow-up
-    assert calls == [True, True]  # only opening + the silent take_exit
+    assert reply == "Bye, come back anytime!"
+    # Three inferences: opening + silent-take_exit + tools-cleared follow-up.
+    assert calls == [True, True, False]
     assert ts.ended
 
 

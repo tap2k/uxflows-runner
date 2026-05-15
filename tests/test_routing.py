@@ -65,6 +65,37 @@ def test_plan_calc_shortcut_in_confirm_when_var_present():
     assert plan.shortcut.exit_path.id == "x_done"
 
 
+def test_plan_terminator_flow_fires_unconditional_exit_as_shortcut():
+    """A flow whose only exits are unconditional is a pure terminator: speak
+    the script, then leave. The planner pre-resolves the shortcut so the
+    runner can fire END after the LLM produces its closing line, instead of
+    looping the flow forever. Regression for the Tala wrong-number repeat bug."""
+    from uxflows_runner.spec.loader import _index
+    from uxflows_runner.spec.types import (
+        Agent,
+        AgentMeta,
+        ExitPath,
+        Flow,
+        Spec,
+    )
+
+    flow = Flow(
+        id="closer",
+        type="sad",
+        exit_paths=[ExitPath(id="x_end", goto="END", condition=None)],
+    )
+    spec = Spec(
+        agent=Agent(id="ag", meta=AgentMeta(modes=["voice"]), entry_flow_id="closer"),
+        flows=[flow],
+    )
+    loaded = _index(spec, raw="{}")
+    plan = routing.plan(loaded, "closer", {}, has_caller=False)
+    assert plan.shortcut is not None
+    assert plan.shortcut.kind == "end"
+    assert plan.shortcut.exit_path.id == "x_end"
+    assert plan.llm_exit_paths == []
+
+
 def test_plan_includes_global_interrupts(coffee):
     """int_menu is global; should appear as a candidate from any flow."""
     plan = routing.plan(coffee, "flow_coffee_order", {}, has_caller=False)

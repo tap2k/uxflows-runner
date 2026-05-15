@@ -79,6 +79,16 @@ def plan(
     active = spec.flows_by_id[active_flow_id]
     plan = RoutingPlan(active_flow=active)
 
+    # If every exit path is unconditional (terminator flow: speak the script,
+    # then leave), fire the first one immediately. There's nothing for the LLM
+    # to route on, and waiting for an LLM turn would loop the flow forever.
+    if active.exit_paths and all(
+        ep.condition is None and not is_return_goto(ep.goto)
+        for ep in active.exit_paths
+    ):
+        plan.shortcut = _build_take_exit(active, active.exit_paths[0])
+        return plan
+
     for ep in active.exit_paths:
         # A RETURN exit is only meaningful when we have a frame to pop.
         # Surface as an LLM-driven `take_exit_path` candidate — the LLM picks
@@ -90,8 +100,9 @@ def plan(
 
         condition = ep.condition
         if condition is None:
-            # Unconditional exit. Treated as a fallback — not auto-fired by
-            # the planner; reserved for future explicit-fallback semantics.
+            # Mixed case (some conditional, some not) — explicit-fallback
+            # semantics aren't designed yet. Skip; revisit when a real spec
+            # needs it.
             continue
 
         if condition.method == "llm":

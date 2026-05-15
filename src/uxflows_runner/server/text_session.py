@@ -37,7 +37,9 @@ from uxflows_runner.config import Config
 from uxflows_runner.dispatcher.capabilities import CapabilityDispatcher
 from uxflows_runner.dispatcher.processor import (
     add_capability_result_listener,
+    apply_planned_shortcut,
     apply_tool_call,
+    finalize_pending_end,
     plan_for_active_flow,
 )
 from uxflows_runner.dispatcher.prompt_builder import build_system_prompt
@@ -47,7 +49,7 @@ from uxflows_runner.events.emitter import (
     JsonlEventEmitter,
     MultiEventEmitter,
 )
-from uxflows_runner.events.schema import Event, SessionEnded
+from uxflows_runner.events.schema import Event, SessionEnded, TurnCompleted
 from uxflows_runner.spec.loader import LoadedSpec
 
 
@@ -167,6 +169,11 @@ class TextSession:
             raise SessionAlreadyEnded(self.session_id)
 
         self.session.llm_context.add_message({"role": "user", "content": user_text})
+        self.session.events.emit(
+            TurnCompleted(
+                session_id=self.session.session_id, role="user", text=user_text
+            )
+        )
         return await self._run_one_turn()
 
     def drain_events(self) -> list[Event]:
@@ -203,6 +210,10 @@ class TextSession:
         self._append_assistant(text, tool_calls)
 
         if not tool_calls:
+            # Terminator flow (only unconditional exits): fire its pre-resolved
+            # shortcut so it ends after speaking its line instead of looping.
+            await apply_planned_shortcut(s)
+            finalize_pending_end(s)
             return text
 
         # In v0 the dispatcher emits at most one tool call per turn (one of
@@ -217,7 +228,11 @@ class TextSession:
         # mutation it already applied.
         self._append_tool_result(first_call["id"], first_call["name"])
 
-        if decision is not None and decision.kind in ("trigger_interrupt", "return"):
+        if (
+            decision is not None
+            and decision.kind in ("trigger_interrupt", "return")
+            and not s.pending_end
+        ):
             # Voice path pushes LLMRunFrame; text mode just calls inference
             # again. plan_for_active_flow already ran inside apply_tool_call,
             # so the new flow's prompt + tools are loaded.
@@ -230,25 +245,36 @@ class TextSession:
                 fc = followup_calls[0]
                 await apply_tool_call(s, fc["name"], fc["args"])
                 self._append_tool_result(fc["id"], fc["name"])
+            finalize_pending_end(s)
             return followup_text
 
-        # Silent-take_exit follow-up: Gemini sometimes emits a take_exit_path
-        # tool call with no text part — the routing decision became the entire
+        # Silent take_exit / end follow-up: Gemini sometimes emits the tool
+        # call with no text part — the routing decision became the entire
         # response. The state mutation is correct; the user just gets nothing
         # to read. Issue ONE follow-up inference with tools DROPPED so the
         # model can only produce text (no risk of chained transitions or
         # premature cancel/confirm calls — see RUNNER-PLAN §"Live-test follow-up").
-        # Capped at one follow-up per turn structurally — we don't recurse.
+        # For end decisions this fires against the source flow's still-loaded
+        # prompt (tear-down was deferred via s.pending_end). Capped at one
+        # follow-up per turn structurally — we don't recurse.
         if (
             decision is not None
-            and decision.kind == "take_exit"
+            and (decision.kind in ("take_exit", "end") or s.pending_end)
             and not text
             and not s.ended
         ):
             followup_text, _ = await self._run_inference(include_tools=False)
             self._append_assistant(followup_text, [])
+            # If the new flow is a terminator, its planned shortcut hasn't
+            # fired yet — apply it now so we end in the same turn.
+            await apply_planned_shortcut(s)
+            finalize_pending_end(s)
             return followup_text
 
+        # The LLM produced text alongside the tool call — no follow-up needed.
+        # Still finalize any pending end (the source flow already spoke its
+        # closing line on this turn).
+        finalize_pending_end(s)
         return text
 
     async def _run_inference(
@@ -311,6 +337,12 @@ class TextSession:
                 for tc in tool_calls
             ]
         self.session.llm_context.add_message(msg)
+        if text:
+            self.session.events.emit(
+                TurnCompleted(
+                    session_id=self.session.session_id, role="agent", text=text
+                )
+            )
 
     def _append_tool_result(self, tool_call_id: str, tool_name: str) -> None:
         # Empty {} payload — the dispatcher consumed the call, no return value

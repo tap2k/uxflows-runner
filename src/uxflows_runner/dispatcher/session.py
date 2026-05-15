@@ -39,6 +39,7 @@ class Session:
     text_emitted_this_turn: bool = False
     skip_next_planning: bool = False
     ended: bool = False
+    pending_end: bool = False
 
     @classmethod
     def start(

@@ -43,6 +43,7 @@ from pipecat.frames.frames import (
     LLMFullResponseEndFrame,
     LLMRunFrame,
     LLMTextFrame,
+    TranscriptionFrame,
 )
 from pipecat.processors.aggregators.llm_context import NOT_GIVEN
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
@@ -60,6 +61,7 @@ from uxflows_runner.events.schema import (
     FlowExited,
     InterruptTriggered,
     SessionEnded,
+    TurnCompleted,
     VariableSet,
 )
 from uxflows_runner.spec.types import Flow
@@ -105,10 +107,14 @@ class PreLLMPlanner(FrameProcessor):
 
 
 class TextFrameWatcher(FrameProcessor):
-    """Sits between the LLM service and TTS. Flips
-    `session.text_emitted_this_turn = True` whenever the LLM pushes a
-    non-empty `LLMTextFrame`. Used by the silent-take_exit follow-up to
-    detect responses where the model emitted ONLY a tool call (silent UX).
+    """Sits between the LLM service and TTS. Two responsibilities:
+
+    1. Flip `session.text_emitted_this_turn = True` whenever the LLM pushes a
+       non-empty `LLMTextFrame` — used by the silent-take_exit follow-up to
+       detect responses where the model emitted ONLY a tool call (silent UX).
+    2. Accumulate the streamed text parts of this response and emit a
+       `TurnCompleted` event when the response ends — so JSONL traces show
+       what the agent actually said, not just which exits fired.
 
     Pipecat's LLM service streams text parts via `push_frame()` synchronously
     during response generation; tool handlers run after streaming ends.
@@ -119,15 +125,54 @@ class TextFrameWatcher(FrameProcessor):
     def __init__(self, session: Session) -> None:
         super().__init__()
         self._session = session
+        self._buf: list[str] = []
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+        if direction == FrameDirection.DOWNSTREAM:
+            if isinstance(frame, LLMTextFrame) and frame.text:
+                self._session.text_emitted_this_turn = True
+                self._buf.append(frame.text)
+            elif isinstance(frame, LLMFullResponseEndFrame):
+                if self._buf:
+                    self._session.events.emit(
+                        TurnCompleted(
+                            session_id=self._session.session_id,
+                            role="agent",
+                            text="".join(self._buf),
+                        )
+                    )
+                self._buf.clear()
+        await self.push_frame(frame, direction)
+
+
+class UserTranscriptWatcher(FrameProcessor):
+    """Emits a `TurnCompleted` event for each finalized STT transcript so
+    JSONL traces show what the runner actually heard from the user.
+
+    Sits between `stt` and `context_aggregator.user()`. Interim partials are
+    ignored; only `finalized=True` frames (or finalized==unset, treated as
+    final by default for STT services that don't set the flag) are emitted.
+    """
+
+    def __init__(self, session: Session) -> None:
+        super().__init__()
+        self._session = session
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
         if (
-            isinstance(frame, LLMTextFrame)
+            isinstance(frame, TranscriptionFrame)
             and direction == FrameDirection.DOWNSTREAM
             and frame.text
         ):
-            self._session.text_emitted_this_turn = True
+            self._session.events.emit(
+                TurnCompleted(
+                    session_id=self._session.session_id,
+                    role="user",
+                    text=frame.text,
+                )
+            )
         await self.push_frame(frame, direction)
 
 
@@ -187,17 +232,22 @@ def register_dispatcher_tools(llm: LLMService, session: Session) -> None:
         )
         if decision is None:
             return
-        if decision.kind in ("trigger_interrupt", "return"):
+        if decision.kind in ("trigger_interrupt", "return") and not session.pending_end:
             await params.llm.push_frame(LLMRunFrame())
             return
-        # Silent-take_exit follow-up: Gemini sometimes emits the tool call
-        # with no text part — state mutates correctly but the user gets dead
-        # air. Push ONE follow-up inference with tools cleared so the model
-        # produces words and can't chain another transition. Mirrors the
-        # text-mode pattern in TextSession._run_one_turn. Skipped on
-        # terminal exits (`end`) — there's no flow left to speak from.
+        # Silent take_exit / end follow-up: Gemini sometimes emits the tool
+        # call with no text part — state mutates correctly but the user gets
+        # dead air. Push ONE follow-up inference with tools cleared so the
+        # model produces words and can't chain another transition. The source
+        # flow's prompt is still loaded (take_exit only swaps AFTER this
+        # frame fires; end defers tear-down via s.pending_end), so the
+        # closing line is spoken in the source flow's voice. For pending
+        # ends, finalize_pending_end() runs on the resulting turn-end.
+        # `return` decisions that collapsed to a pending_end (RETURN with no
+        # caller frame, per schema) take this path too — same lifecycle as
+        # an explicit END.
         if (
-            decision.kind == "take_exit"
+            (decision.kind in ("take_exit", "end") or session.pending_end)
             and not session.text_emitted_this_turn
             and not session.ended
         ):
@@ -225,21 +275,35 @@ async def apply_tool_call(
     and re-plan the active flow if a transition happened.
 
     Returns the Decision so the caller can decide whether a follow-up LLM
-    inference is needed. `trigger_interrupt` and `return` need one
-    (Gemini AUTO mode reliably emits text + tool together on `take_exit_path`,
-    but tends to emit ONLY the function call on interrupts — silence to the
-    patron. We tried prompt + tool-description mandates; they don't reliably
-    override the model's instinct that an interrupt-style off-path question
-    is *itself* the answer. The 2-call-per-interrupt cost is acceptable given
-    interrupts are rare. take_exit transitions don't need a follow-up: the
-    LLM answered this turn, and the new flow speaks on the NEXT user turn
-    per RUNNER-PLAN's "routing is next-turn" rule.)
+    inference is needed. Two follow-up shapes exist:
+
+    - **New-flow follow-up** (`trigger_interrupt`, `return` into a caller):
+      the new flow's prompt is loaded and the LLM should speak its opener.
+      Gemini AUTO mode tends to emit ONLY the function call on these (silence
+      to the user); a second LLMRunFrame against the new prompt is needed.
+
+    - **Source-flow silent follow-up** (`take_exit`, `end`, or `return`
+      collapsed to a pending end): the source flow's prompt is still loaded
+      and the LLM should speak the flow's closing line before we transition
+      or tear down. Gemini reliably co-emits text with `take_exit_path`, but
+      not always — when it doesn't, we fire one tools-cleared follow-up so
+      the model can only produce text (no chained transitions). For `end`
+      decisions, tear-down is deferred via `s.pending_end` so the prompt
+      stays loaded; `finalize_pending_end` completes the lifecycle at
+      turn-end.
 
     Voice mode pushes an LLMRunFrame for the follow-up; text mode does a
     second generate_content call inline.
 
     Returns None if the tool call arrived without a current_plan (guard
     against PreLLMPlanner not having run).
+
+    SMELL: callers currently classify which follow-up shape applies by
+    checking `decision.kind` plus `session.pending_end` directly. That
+    classification is duplicated in voice (`_take_exit_path`) and text
+    (`_run_one_turn`). If a third call-site appears or the rules grow
+    another case, extract a `follow_up_for(decision, session)` helper that
+    returns a pipeline-action enum. Two call-sites isn't yet worth it.
     """
     s = session
     s.tool_handler_fired_this_turn = True
@@ -257,6 +321,43 @@ async def apply_tool_call(
         plan_for_active_flow(s)
 
     return decision
+
+
+def finalize_pending_end(s: Session) -> bool:
+    """Complete a deferred session end. Called at turn-end after any silent
+    follow-up has produced the closing utterance. Emits SessionEnded and
+    tears down. Returns True if a tear-down occurred.
+
+    The deferral pattern: when an exit-path's goto is END (or RETURN with no
+    caller), `_do_take_exit` / `_do_return` set `s.pending_end = True` and
+    return without tearing down. The source flow's prompt stays loaded so a
+    silent-take_exit follow-up can speak the flow's closing line in the
+    source flow's voice. Once that turn completes, this finalizer fires.
+    """
+    if not s.pending_end or s.ended:
+        return False
+    from uxflows_runner.events.schema import SessionEnded
+
+    s.events.emit(SessionEnded(session_id=s.session_id, reason="agent_terminal"))
+    s.state.end()
+    s.ended = True
+    s.pending_end = False
+    return True
+
+
+async def apply_planned_shortcut(s: Session) -> bool:
+    """If the active flow's plan has a pre-resolved shortcut (a terminator
+    flow with only unconditional exits), apply it and return True. Used by
+    both voice (PostLLMResolver) and text (TextSession) after the LLM turn
+    when no tool call fired. Without this, terminator flows loop forever —
+    they emit their script every turn but never transition out.
+    """
+    if s.ended:
+        return False
+    if s.current_plan is None or s.current_plan.shortcut is None:
+        return False
+    await _apply_decision(s.current_plan.shortcut, s)
+    return True
 
 
 async def _apply_decision(
@@ -335,6 +436,10 @@ async def _do_take_exit(
     )
 
     if decision.kind == "end":
+        # Decoupled lifecycle: emit FlowExited and mark the session as
+        # pending_end, but do NOT tear down yet. The source flow's prompt
+        # stays loaded so the silent-follow-up can produce a closing line.
+        # finalize_pending_end() runs at turn-end and emits SessionEnded.
         s.events.emit(
             FlowExited(
                 session_id=s.session_id,
@@ -343,11 +448,7 @@ async def _do_take_exit(
                 reason="terminal",
             )
         )
-        s.events.emit(
-            SessionEnded(session_id=s.session_id, reason="agent_terminal")
-        )
-        s.state.end()
-        s.ended = True
+        s.pending_end = True
         return
 
     # take_exit — transition into a flow.
@@ -415,7 +516,8 @@ async def _do_return(s: Session, decision: routing_mod.Decision) -> None:
     source_flow = decision.source_flow
     assert exit_path is not None and source_flow is not None
 
-    # RETURN with no caller frame collapses to END (per schema).
+    # RETURN with no caller frame collapses to END (per schema). Defer the
+    # tear-down — same lifecycle as `_do_take_exit`'s end branch.
     if not s.state.has_caller:
         s.events.emit(
             FlowExited(
@@ -425,11 +527,7 @@ async def _do_return(s: Session, decision: routing_mod.Decision) -> None:
                 reason="terminal",
             )
         )
-        s.events.emit(
-            SessionEnded(session_id=s.session_id, reason="agent_terminal")
-        )
-        s.state.end()
-        s.ended = True
+        s.pending_end = True
         return
 
     popped, caller = s.state.pop_to_caller()
@@ -488,12 +586,20 @@ class PostLLMResolver(FrameProcessor):
         s = self._session
         if s.ended:
             return
+
+        # If a previous turn deferred a session end so its silent follow-up
+        # could speak, this is the turn after that follow-up — finalize now.
+        if finalize_pending_end(s):
+            return
+
         if s.tool_handler_fired_this_turn:
             return  # handler already advanced state
 
-        # No tool fired — the LLM produced text only. We "stay" by default
-        # and tick the turn counter (used for observability and future
-        # `_turn_count` reserved-variable support; see SCHEMA.md Open Questions).
+        # No tool fired — the LLM produced text only. If this is a terminator
+        # flow, apply its planned shortcut so it ends after speaking its line.
+        # (The shortcut itself may set pending_end; finalize runs next turn.)
+        if await apply_planned_shortcut(s):
+            return
         s.state.increment_turn()
 
 

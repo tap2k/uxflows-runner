@@ -30,6 +30,7 @@ from uxflows_runner.dispatcher.processor import (
     PostLLMResolver,
     PreLLMPlanner,
     TextFrameWatcher,
+    UserTranscriptWatcher,
     add_capability_result_listener,
     register_dispatcher_tools,
 )
@@ -121,6 +122,7 @@ async def run_session(
     register_dispatcher_tools(llm, session)
 
     pre = PreLLMPlanner(session)
+    user_transcript_watch = UserTranscriptWatcher(session)
     text_watch = TextFrameWatcher(session)
     post = PostLLMResolver(session)
 
@@ -128,6 +130,7 @@ async def run_session(
         [
             transport.input(),
             stt,
+            user_transcript_watch,
             context_aggregator.user(),
             pre,
             llm,
@@ -165,6 +168,16 @@ async def run_session(
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(_transport, _client):
         logger.info("client disconnected — cancelling pipeline")
+        # Emit a terminal event so traces always end with a SessionEnded —
+        # otherwise voice sessions that end via the user closing the tab
+        # just truncate, indistinguishable from a runner crash.
+        if not session.ended:
+            from uxflows_runner.events.schema import SessionEnded as _SessionEnded
+
+            session.events.emit(
+                _SessionEnded(session_id=session.session_id, reason="user_stop")
+            )
+            session.ended = True
         await capabilities.aclose()
         await task.cancel()
 
