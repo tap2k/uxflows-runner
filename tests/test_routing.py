@@ -202,6 +202,19 @@ def test_resolve_trigger_interrupt_beats_take_exit(coffee):
     assert decision.target_flow_id == "int_menu"
 
 
+def test_unknown_condition_method_raises():
+    """The methods evaluator must reject unknown method names, not silently
+    fall through. Conditions reach this via routing's plan/resolve path."""
+    from uxflows_runner.dispatcher import methods
+    from uxflows_runner.spec.types import Condition
+
+    with pytest.raises(methods.MethodError):
+        methods.evaluate_condition(
+            Condition.model_construct(method="bogus", expression="x"),
+            {}, {}, llm_key="x",
+        )
+
+
 def test_resolve_interrupt_beats_shortcut():
     """A triggered interrupt is a topical detour; honor it even when the
     plan has a calc shortcut. The shortcut still applies on RETURN

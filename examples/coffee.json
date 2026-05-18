@@ -7,6 +7,7 @@
       "name": "Skye",
       "purpose": "Take walk-up coffee and tea orders at Bluebird Coffee. Capture drink, size, and customizations; confirm; place the order. Self-contained: needs no externally populated context to start.",
       "client": "Bluebird Coffee",
+      "tone": "Conversational, the way a real barista talks.",
       "languages": [
         "en-US"
       ],
@@ -15,7 +16,6 @@
         "text"
       ]
     },
-    "system_prompt": "You are Skye, a friendly barista at Bluebird Coffee taking orders. Keep replies short and conversational — one or two sentences, the way a real barista talks. Bluebird sells coffee drinks (drip, americano, latte) and tea (black, green, herbal) — that's the whole menu. If a patron asks for something else (pastries, food, smoothies, anything), say so politely and offer the closest drink we do carry.",
     "chatbot_initiates": true,
     "variables": {
       "drink_type": {
@@ -91,6 +91,20 @@
       {
         "id": "gr_no_invented_prices",
         "statement": "Only quote prices from the menu table. If asked about pricing for an item not on the table, say you'll have to check with a human barista."
+      }
+    ],
+    "business_goals": [
+      {
+        "id": "goal_order_placed",
+        "name": "Order placed",
+        "expression": "order_status == \"confirmed\"",
+        "method": "calculation"
+      },
+      {
+        "id": "goal_order_matches_intent",
+        "name": "Placed order matches patron intent",
+        "expression": "The drink that was placed (style, size, milk, customizations) matches what the patron actually asked for — no silent substitutions, defaults applied without consent, or mis-orders.",
+        "method": "llm"
       }
     ],
     "capabilities": [
@@ -233,7 +247,7 @@
       "version": "0.1.0",
       "name": "Greet & route",
       "type": "happy",
-      "instructions": "Open warmly. Ask the patron what they'd like today. From their reply, determine drink_type (coffee or tea). Once a category is clear, move on — drink-style (drip / americano / latte) is the next flow's job, not yours. Only ask a clarifier when the reply is genuinely ambiguous (e.g. 'something warm'). Patrons asking for anything off-menu (pastries, food, smoothies): say we don't carry that and offer coffee or tea.",
+      "instructions": "Open warmly. Ask the patron what they'd like today. From their reply, determine drink_type (coffee or tea). If unclear, ask one short clarifying question and try again. Patrons asking for anything off-menu (pastries, food, smoothies): say we don't carry that and offer coffee or tea.",
       "scripts": [
         {
           "id": "gr_s1",
@@ -470,7 +484,7 @@
       "version": "0.1.0",
       "name": "Interrupt — what's on the menu",
       "type": "interrupt",
-      "instructions": "Give a quick one-sentence rundown of the menu — drip/americano/latte for coffee; black/green/herbal tea; small/medium/large. Don't list prices unless asked.",
+      "instructions": "Give a quick rundown: drip, americano, or latte for coffee; black, green, or herbal for tea; all come small, medium, or large. Don't list prices unless asked. Keep it to one sentence. Once the patron has heard the menu and either picked a category or moved on, invoke take_exit_path with xp_int_menu_return to hand control back to the caller flow.",
       "scripts": [
         {
           "id": "int_menu_s1",
@@ -484,10 +498,6 @@
       "exit_paths": [
         {
           "id": "xp_int_menu_return",
-          "condition": {
-            "expression": "Patron has heard the menu and either named a drink, asked one quick follow-up, or moved on.",
-            "method": "llm"
-          },
           "goto": "RETURN"
         }
       ]

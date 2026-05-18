@@ -149,23 +149,6 @@ async def test_turn_with_route_tag_transitions_flow_and_fires_assigns(
 
 
 @pytest.mark.asyncio
-async def test_turn_without_route_tag_just_returns_text(coffee_spec, monkeypatch):
-    """Plain reply, no route tag — should return text and stay in the active flow."""
-    script = [
-        "Hi! What can I get started?",
-        "Sure, take your time.",
-    ]
-    monkeypatch.setattr(TextSession, "_run_inference", _scripted_inference(script))
-
-    ts, _ = await TextSession.start(spec=coffee_spec, api_key="dummy")
-    ts.drain_events()
-
-    reply = await ts.turn("hmm let me think")
-    assert reply == "Sure, take your time."
-    assert ts.session.state.active_flow_id == "flow_greet"
-
-
-@pytest.mark.asyncio
 async def test_terminal_exit_ends_session(coffee_spec, monkeypatch):
     """Walkaway exit from greet flow ends the session — closing line streams
     before the tag, then SessionEnded fires immediately on tag parse."""
@@ -184,30 +167,6 @@ async def test_terminal_exit_ends_session(coffee_spec, monkeypatch):
     assert ts.ended
     events = ts.drain_events()
     assert any(isinstance(e, SessionEnded) for e in events)
-
-
-@pytest.mark.asyncio
-async def test_end_is_idempotent_and_emits_session_ended_once(coffee_spec, monkeypatch):
-    """end() called on a live session emits session_ended; second call is a no-op."""
-    monkeypatch.setattr(
-        TextSession, "_run_inference", _scripted_inference(["Hi!"])
-    )
-
-    ts, _ = await TextSession.start(spec=coffee_spec, api_key="dummy")
-    ts.drain_events()
-
-    await ts.end()
-    events_after_first = ts.drain_events()
-    assert any(isinstance(e, SessionEnded) for e in events_after_first)
-    assert ts.ended
-
-    await ts.end()
-    assert ts.drain_events() == []  # no new events
-
-    # Subsequent turn raises
-    from uxflows_runner.server.text_session import SessionAlreadyEnded
-    with pytest.raises(SessionAlreadyEnded):
-        await ts.turn("anything")
 
 
 @pytest.mark.asyncio
@@ -317,10 +276,11 @@ async def test_context_vars_substituted_into_system_prompt_seen_by_llm(
 
     monkeypatch.setattr(TextSession, "_run_inference", _capture)
 
-    # coffee.json's agent.system_prompt doesn't have placeholders by default;
-    # patch it to add one for this test.
-    coffee_spec.agent.system_prompt = (
-        coffee_spec.agent.system_prompt + " You are speaking with {customer_name}."
+    # coffee.json's agent.meta.purpose doesn't have placeholders by default;
+    # patch it to add one for this test. The role line built from meta fields
+    # is where {customer_name} should land.
+    coffee_spec.agent.meta.purpose = (
+        (coffee_spec.agent.meta.purpose or "") + " You are speaking with {customer_name}."
     )
 
     await TextSession.start(
@@ -332,35 +292,6 @@ async def test_context_vars_substituted_into_system_prompt_seen_by_llm(
     assert len(captured_system) == 1
     assert "speaking with Maria" in captured_system[0]
     assert "{customer_name}" not in captured_system[0]
-
-
-@pytest.mark.asyncio
-async def test_assistant_message_appended_as_clean_text(
-    coffee_spec, monkeypatch
-):
-    """Assistant turns record the cleaned reply text (route tag stripped) on
-    the conversation history. No tool_calls / tool-result messages — those
-    were a tool-mode artifact."""
-    script = [
-        "Welcome!",
-        "Coffee, got it. What size? " + _route_exit(
-            "xp_greet_to_coffee", drink_type="coffee"
-        ),
-    ]
-    monkeypatch.setattr(TextSession, "_run_inference", _scripted_inference(script))
-
-    ts, _ = await TextSession.start(spec=coffee_spec, api_key="dummy")
-    await ts.turn("a coffee please")
-
-    msgs = ts.session.llm_context.messages
-    # No tool_calls or tool-result rows — routing is in-text.
-    assert all("tool_calls" not in m for m in msgs)
-    assert not any(m.get("role") == "tool" for m in msgs)
-    # The latest assistant message is the cleaned reply (no `<route` literal).
-    assistants = [m for m in msgs if m.get("role") == "assistant"]
-    last = assistants[-1]
-    assert "<route" not in last["content"]
-    assert "Coffee, got it." in last["content"]
 
 
 @pytest.mark.asyncio

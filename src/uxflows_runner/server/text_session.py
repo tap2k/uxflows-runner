@@ -35,7 +35,6 @@ from uxflows_runner.config import Config
 from uxflows_runner.dispatcher.capabilities import CapabilityDispatcher
 from uxflows_runner.dispatcher import routing_protocol
 from uxflows_runner.dispatcher.processor import (
-    add_capability_result_listener,
     apply_planned_shortcut,
     apply_route,
     plan_for_active_flow,
@@ -76,6 +75,7 @@ class TextSession:
         execution_endpoints: dict[str, str] | None = None,
         config: Config | None = None,
         context_vars: dict[str, Any] | None = None,
+        mock_returns: dict[str, dict[str, Any]] | None = None,
     ) -> tuple["TextSession", str]:
         """Construct + run session_started + flow_entered + opening turn (if
         chatbot_initiates). Returns (self, opening_agent_text).
@@ -90,6 +90,12 @@ class TextSession:
         system prompt and as initial values readable by routing conditions /
         capability inputs. Not emitted as `variable_set` events (those are
         for exit-path-fired assigns; these are session-start seeds).
+
+        `mock_returns` is a per-session simulation fixture keyed by capability
+        NAME (not id): when a dispatched capability has a matching entry, the
+        dispatcher returns that dict instead of hitting an HTTP endpoint. Lets
+        the editor's SimulatePanel probe happy / sad paths without standing up
+        a mock server. Production deployments leave it unset.
         """
         # No fallback: None means "all languages" — the prompt builder emits
         # every script bucket. Clients that want single-language behavior
@@ -114,7 +120,11 @@ class TextSession:
             )
 
         events = BufferingEventEmitter()
-        capabilities = CapabilityDispatcher(spec=spec, endpoints=execution_endpoints or {})
+        capabilities = CapabilityDispatcher(
+            spec=spec,
+            endpoints=execution_endpoints or {},
+            mock_returns=mock_returns,
+        )
         # Build LLMContext with a placeholder system message; we'll replace it
         # below after seeding context_vars so the initial prompt has them
         # substituted in.
@@ -140,8 +150,6 @@ class TextSession:
             spec, entry_flow, lang, variables=session.state.variables
         )
         context.messages[0]["content"] = initial_prompt
-
-        add_capability_result_listener(session)
 
         ts = cls(session=session, llm=llm, events=events)
 

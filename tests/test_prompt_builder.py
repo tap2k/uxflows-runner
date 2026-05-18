@@ -19,29 +19,6 @@ def coffee():
     return load_spec(COFFEE)
 
 
-def test_system_prompt_contains_agent_and_flow_pieces(coffee):
-    flow = coffee.flows_by_id["flow_greet"]
-    prompt = prompt_builder.build_system_prompt(coffee, flow, lang="en-US")
-
-    # Agent system prompt
-    assert "barista at Bluebird Coffee" in prompt
-    # Agent guardrails
-    assert "Operating principles:" in prompt
-    assert "Patrons want their coffee" in prompt
-    # FAQ
-    assert "Frequently asked:" in prompt
-    assert "Do you have decaf?" in prompt
-    # Glossary
-    assert "Terminology:" in prompt
-    assert "Drip:" in prompt
-    # Flow section
-    assert "This flow (flow_greet):" in prompt
-    assert "Open warmly" in prompt
-    # Scripted lines
-    assert "Scripted lines" in prompt
-    assert "Welcome to Bluebird" in prompt or "welcome to Bluebird" in prompt
-
-
 def test_routing_protocol_lists_exits_and_interrupts_on_greet(coffee):
     """flow_greet has three llm-method exits plus a global interrupt
     (int_menu). All four should appear in the rendered routing protocol
@@ -66,15 +43,15 @@ def test_routing_protocol_omitted_when_no_plan(coffee):
 
 def test_routing_protocol_inside_interrupt_offers_return(coffee):
     """Inside int_menu the only exit is a RETURN — render it as a route
-    candidate with its condition expression."""
+    candidate. Editor-canonical coffee.json has no condition on the return
+    exit, so the protocol falls back to the default return intent prose."""
     flow = coffee.flows_by_id["int_menu"]
     plan = routing.plan(coffee, "int_menu", {}, has_caller=True)
     prompt = prompt_builder.build_system_prompt(coffee, flow, lang="en-US", plan=plan)
     assert "xp_int_menu_return" in prompt
-    # int_menu's return exit carries a condition.expression — that's what the
-    # author wrote, and the routing protocol uses it verbatim so the LLM
-    # knows WHEN to fire the return tag.
-    assert "named a drink" in prompt
+    # Default fallback intent for an unconditional RETURN exit, from
+    # prompt_builder._exit_path_intent.
+    assert "side conversation is naturally complete" in prompt
 
 
 def test_routing_protocol_render_includes_destinations(coffee):
@@ -102,7 +79,6 @@ def test_per_language_faq_used():
     agent = Agent(
         id="ag",
         meta=AgentMeta(languages=["en-US", "es-ES"], modes=["voice"]),
-        system_prompt="x",
         knowledge=AgentKnowledge(
             faq=[
                 FAQEntry(
@@ -218,9 +194,10 @@ def test_routing_protocol_substitutes_session_variables():
 
 
 def test_build_system_prompt_substitutes_across_multiple_sections(coffee):
-    """Variables seeded into the variable bag get substituted in agent.system_prompt
-    AND flow.scripts AND any other composed section. Verifies the substitution
-    runs as a final pass over the joined prompt, not per-section."""
+    """Variables seeded into the variable bag get substituted in the
+    synthesized role line (meta.purpose / meta.tone) AND flow.scripts AND any
+    other composed section. Verifies substitution runs as a final pass over
+    the joined prompt, not per-section."""
     from uxflows_runner.spec.loader import _index
     from uxflows_runner.spec.types import (
         Agent,
@@ -233,8 +210,7 @@ def test_build_system_prompt_substitutes_across_multiple_sections(coffee):
     agent = Agent(
         id="agent_x",
         version="0.1.0",
-        meta=AgentMeta(name="X", purpose="p", client="c"),
-        system_prompt="You are helping {customer_name}.",
+        meta=AgentMeta(name="X", purpose="Help {customer_name} with their order.", client="c"),
         chatbot_initiates=True,
         entry_flow_id="f",
     )
@@ -249,7 +225,7 @@ def test_build_system_prompt_substitutes_across_multiple_sections(coffee):
     prompt = prompt_builder.build_system_prompt(
         spec, flow, lang="en-US", variables={"customer_name": "Maria"}
     )
-    assert "helping Maria" in prompt
+    assert "Help Maria with their order" in prompt
     assert "Greet Maria warmly" in prompt
     assert "Welcome, Maria!" in prompt
     assert "{customer_name}" not in prompt

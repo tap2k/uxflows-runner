@@ -81,3 +81,13 @@ def test_calculation_assign_evaluates():
     results = assigns.fire(ep, bag, llm_results={})
     assert bag["big_loan"] is True
     assert results[0].method == "calculation"
+
+
+def test_calculation_assign_value_must_be_string():
+    """Calculation assigns evaluate `value` as an expression — non-string values
+    are a spec error and must surface as MethodError, not crash deep in the AST."""
+    from uxflows_runner.dispatcher import methods
+
+    a = Assign(method="calculation", value=123)
+    with pytest.raises(methods.MethodError):
+        methods.evaluate_assign(a, {}, {}, llm_key="x")

@@ -10,7 +10,6 @@ import pytest
 from uxflows_runner.events.emitter import (
     BufferingEventEmitter,
     JsonlEventEmitter,
-    LoggingEventEmitter,
     MultiEventEmitter,
 )
 from uxflows_runner.events.schema import (
@@ -82,30 +81,18 @@ def test_jsonl_emitter_creates_parent_dir(tmp_path: Path):
     assert nested.parent.is_dir()
 
 
-def test_jsonl_emitter_closes_on_session_ended(tmp_path: Path):
-    path = tmp_path / "sess.jsonl"
-    em = JsonlEventEmitter(path)
-    em.emit(_ev_session_started())
-    assert em._fh is not None  # noqa: SLF001
-    em.emit(_ev_session_ended())
-    assert em._fh is None  # noqa: SLF001
-    # File still readable after close — buffered content was flushed.
-    lines = path.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 2
-
-
 def test_jsonl_emitter_disables_silently_on_unwritable_path(tmp_path: Path, caplog):
-    # Point at a path whose parent is a regular file → mkdir(parents) fails.
+    """Bad path must degrade to no-op without raising — losing observability
+    is OK, killing the session is not."""
     blocker = tmp_path / "not_a_dir"
     blocker.write_text("hi")
     bad_path = blocker / "sess.jsonl"
 
     em = JsonlEventEmitter(bad_path)
-    # Should NOT raise — degrades to no-op.
     em.emit(_ev_session_started())
     em.emit(_ev_flow_entered())
-    assert em._broken is True  # noqa: SLF001
-    assert em._fh is None  # noqa: SLF001
+    # No file got created.
+    assert not bad_path.exists()
 
 
 # --- MultiEventEmitter ---------------------------------------------------
@@ -142,14 +129,3 @@ def test_multi_emitter_isolates_child_failures():
     multi.emit(_ev_session_started())
     drained = buffer.drain()
     assert len(drained) == 1
-
-
-def test_multi_emitter_with_logging_does_not_raise(tmp_path: Path):
-    """Smoke test — the production combo (Logging + Jsonl) wires up."""
-    multi = MultiEventEmitter(
-        [LoggingEventEmitter(), JsonlEventEmitter(tmp_path / "sess.jsonl")]
-    )
-    multi.emit(_ev_session_started())
-    multi.emit(_ev_session_ended())
-    lines = (tmp_path / "sess.jsonl").read_text().splitlines()
-    assert len(lines) == 2

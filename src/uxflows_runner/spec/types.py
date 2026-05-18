@@ -147,6 +147,7 @@ class AgentMeta(Strict):
     name: str | None = None
     purpose: str | None = None
     client: str | None = None
+    tone: str | None = None
     languages: list[str] = Field(default_factory=list)
     modes: list[Literal["voice", "text"]] = Field(default_factory=list)
 
@@ -227,7 +228,6 @@ class Agent(Strict):
     id: str
     version: str | None = None
     meta: AgentMeta = Field(default_factory=AgentMeta)
-    system_prompt: str | None = None
     chatbot_initiates: bool = False
     guardrails: list[Guardrail] = Field(default_factory=list)
     business_goals: list[BusinessGoal] = Field(default_factory=list)

@@ -82,7 +82,7 @@ class VariableSet(_Base):
     type: Literal["variable_set"] = "variable_set"
     variable_name: str
     value: Any
-    method: Literal["llm", "calculation", "direct"]
+    method: Literal["llm", "calculation", "direct", "capability"]
     source_flow_id: str
     source_exit_path_id: str
 

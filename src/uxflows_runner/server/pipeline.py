@@ -31,7 +31,6 @@ from uxflows_runner.dispatcher.processor import (
     PreLLMPlanner,
     RouteTagFrameProcessor,
     UserTranscriptWatcher,
-    add_capability_result_listener,
 )
 from uxflows_runner.dispatcher.prompt_builder import build_system_prompt
 from uxflows_runner.dispatcher.session import Session
@@ -50,6 +49,7 @@ async def run_session(
     execution_config_path: str | None = None,
     context_vars: dict | None = None,
     language: str | None = None,
+    mock_returns: dict[str, dict] | None = None,
 ) -> None:
     """Run a single voice session bound to one WebRTC peer connection.
 
@@ -95,7 +95,11 @@ async def run_session(
     endpoints = (
         load_execution_config(execution_config_path) if execution_config_path else {}
     )
-    capabilities = CapabilityDispatcher(spec=spec, endpoints=endpoints)
+    capabilities = CapabilityDispatcher(
+        spec=spec,
+        endpoints=endpoints,
+        mock_returns=mock_returns,
+    )
 
     events = LoggingEventEmitter()
     session = Session.start(
@@ -115,8 +119,6 @@ async def run_session(
         spec, entry_flow, lang, variables=session.state.variables
     )
     context.messages[0]["content"] = initial_prompt
-
-    add_capability_result_listener(session)
 
     pre = PreLLMPlanner(session)
     user_transcript_watch = UserTranscriptWatcher(session)

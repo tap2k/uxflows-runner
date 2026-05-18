@@ -3,7 +3,7 @@ in-text routing protocol that lists this turn's available exits and
 interrupts.
 
 Layout:
-  agent.system_prompt
+  synthesized role line (meta.name + meta.client + meta.purpose + meta.tone)
   + agent.guardrails (Operating principles)
   + agent.knowledge.faq (Frequently asked)
   + agent.knowledge.glossary (Terminology)
@@ -14,10 +14,10 @@ Layout:
   + Routing protocol (exits + interrupts available this turn, format,
     one-shot example) — only when a RoutingPlan is supplied.
 
-Translatable fields (`system_prompt`, `guardrail.statement`, `faq.answer`,
-`glossary.definition`, `flow.instructions`, `script.text`) are all
-LocalizedString — resolved through `resolve_localized` against the
-session's active language with fallback to the agent's default language.
+Translatable fields (`guardrail.statement`, `faq.answer`, `glossary.definition`,
+`flow.instructions`, `script.text`) are all LocalizedString — resolved through
+`resolve_localized` against the session's active language with fallback to the
+agent's default language.
 
 Routing protocol (instead of tool calls): the LLM emits a self-closing
 `<route ... />` tag at the end of its reply. The streaming stripper
@@ -96,20 +96,20 @@ def build_system_prompt(
     default_lang = default_language(agent.meta.languages)
     sections: list[str] = []
 
-    # In-text routing protocol goes FIRST — above the agent's system_prompt.
+    # In-text routing protocol goes FIRST — above the synthesized role line.
     # The model treats top-of-prompt as load-bearing structure; if the
     # protocol lands at the bottom of a 20k-character prompt it gets read
     # as a footnote and the model fluently improvises off-path. We saw this
-    # against the Tala spec: long agent.system_prompt + the protocol at the
+    # against the Tala spec: long role/persona prose + the protocol at the
     # tail produced zero route tags across a 15-turn session.
     if plan is not None:
         routing_section = _render_routing_protocol(spec, plan, variables)
         if routing_section:
             sections.append(routing_section)
 
-    sp = _resolve(agent.system_prompt, lang, default_lang)
-    if sp:
-        sections.append(sp.strip())
+    role_line = _synthesize_role_line(agent.meta)
+    if role_line:
+        sections.append(role_line)
 
     if agent.guardrails:
         sections.append(
@@ -160,7 +160,7 @@ def build_system_prompt(
         text = _resolve(s.text, lang, default_lang)
         if not text:
             continue
-        bucket_lines.append(f"- [{s.id}] {text}")
+        bucket_lines.append(f"- {text}")
         variations_for_lang: list[str] = []
         if s.variations:
             effective = lang or default_lang
@@ -174,8 +174,8 @@ def build_system_prompt(
                 bucket_lines.append(f"  | {v}")
     if bucket_lines:
         sections.append(
-            "Scripted lines — when instructions reference a script by [id], "
-            "say that line verbatim (pick any listed variation if present):\n"
+            "Scripted lines for this flow — speak these phrasings verbatim where natural "
+            "(pick any listed variation if present):\n"
             + "\n".join(bucket_lines)
         )
 
@@ -223,6 +223,31 @@ def _render_routing_protocol(
         "Place the tag at the end of your reply. Omit it if no condition matches."
     )
     return "\n\n".join(parts)
+
+
+def _synthesize_role_line(meta: Any) -> str:
+    """Compose the agent's persona/role line from `meta` fields.
+
+    SCHEMA.md `meta.tone` field note: "Appended to the synthesized role line."
+    Per-policy or behavioral rules go in `guardrails`; this line is just who
+    the agent is and what they're for.
+    """
+    parts: list[str] = []
+    name = (meta.name or "").strip()
+    client = (meta.client or "").strip()
+    purpose = (meta.purpose or "").strip()
+    tone = (meta.tone or "").strip()
+    if name and client:
+        parts.append(f"You are {name}, agent for {client}.")
+    elif name:
+        parts.append(f"You are {name}.")
+    elif client:
+        parts.append(f"You are an agent for {client}.")
+    if purpose:
+        parts.append(purpose)
+    if tone:
+        parts.append(tone)
+    return " ".join(parts).strip()
 
 
 def _exit_destination(ep: ExitPath, flows_by_id: dict[str, Flow] | None) -> str:

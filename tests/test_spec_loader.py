@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from uxflows_runner.spec.loader import applicable_interrupts, load_spec
-from uxflows_runner.spec.types import is_return_goto
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 COFFEE = REPO_ROOT / "examples" / "coffee.json"
@@ -39,18 +38,6 @@ def test_global_interrupt_indexed(coffee_spec):
     assert [f.id for f in globals_] == ["int_menu"]
     # Interrupts are implicitly globally callable.
     assert "int_menu" in {f.id for f in applicable_interrupts(coffee_spec)}
-
-
-def test_return_exit_carries_condition_expression(coffee_spec):
-    """Spec authors can put a `condition.expression` on a RETURN exit to tell
-    the LLM when to return — same idiom as forward exits. The runner surfaces
-    it in the take_exit_path tool description."""
-    int_menu = coffee_spec.flows_by_id["int_menu"]
-    [exit_path] = int_menu.exit_paths
-    assert is_return_goto(exit_path.goto)
-    assert exit_path.condition is not None
-    assert exit_path.condition.method == "llm"
-    assert "named a drink" in exit_path.condition.expression
 
 
 def test_greet_routing_methods(coffee_spec):

@@ -236,6 +236,56 @@ Logged as a v0 rough edge. Not a blocker for the visual demo (the canvas still h
 
 **Common thread.** All three quirks above (silent `trigger_interrupt`, silent `take_exit_path`, walkaway gap) are flavors of the same Gemini instinct: the model treats certain replies as "the answer," not "the answer plus a routing event." Each has its own backstop today — `LLMRunFrame` follow-up on interrupts, no-tools follow-up on take_exit (text mode only so far), prompt-only on walkaway. The cleaner long-term fix is an LLM swap: Claude and GPT-5 bundle text + tool calls more reliably, and dropping each workaround is a one-line `if` flip per handler. None of these are dispatcher bugs — the cognitive layer is the variance source, not the framework-agnostic core.
 
+### Capability mocks alongside `context_vars` (shipped 2026-05-18)
+
+The simulation friction of "stand up a mock server per capability" was the wrong shape. Capabilities have three distinct concerns that belong in three places — and conflating them into the spec or into execution.json mismatches the persona owning each one:
+
+| Concern | Lives in | Owned by |
+|---|---|---|
+| Contract (`inputs`, `outputs`) | spec | conversational designer (it's behavior) |
+| Production endpoint (URL, auth) | sibling `execution.json` | integration engineer |
+| Simulation fixture (what to return at design time) | per-session payload | conversational designer (design-time scaffolding, like `context_vars`) |
+
+The fixture is the exact analogue of `context_vars`: a per-session dict, sent via the session-start payload, never inside the spec. `context_vars` seeds the variable bag; `mock_returns` seeds capability returns. Same pattern, parallel home.
+
+**Decision.** Add `mock_returns: dict[str, dict[str, Any]]` to the `/api/chat/session` and `/api/offer` payloads, keyed by capability **name** (matching how `execution.json` keys endpoints). When the dispatcher fires a capability and a matching `mock_returns[name]` exists, it returns that dict instead of hitting an endpoint. Otherwise the existing endpoint / no-endpoint paths apply.
+
+**Sub-decisions made:**
+- **Mocks shadow endpoints.** If both are configured, the mock wins. Mental model: presence of a mock means "this session is in simulation mode for that capability." Simpler than a separate flag.
+- **Keyed by name, not id.** Matches the execution-config pattern. The id is a spec-internal stable handle; the name is the dispatch identifier.
+- **No new spec field.** `capability.outputs` already names what comes back; the fixture values ride alongside the spec, not in it. Production deployments don't send `mock_returns`, the field stays absent, normal endpoints fire.
+
+**Downstream changes (landed in this commit).**
+- [`capabilities.py`](src/uxflows_runner/dispatcher/capabilities.py) — `CapabilityDispatcher.__init__` accepts `mock_returns`. `_run` checks it before retrieval/function paths and returns the fixture verbatim when matched.
+- [`text_session.py`](src/uxflows_runner/server/text_session.py) — `TextSession.start` threads `mock_returns` through to the dispatcher.
+- [`pipeline.py`](src/uxflows_runner/server/pipeline.py) — `run_session` (voice) does the same for parity.
+- [`app.py`](src/uxflows_runner/server/app.py) — `StartSessionRequest.mock_returns` field; `/api/offer` extracts `mock_returns` from the body alongside `context_vars`. Both endpoints validated to be objects.
+- Tests in [`test_capabilities.py`](tests/test_capabilities.py) — mocks land as `CapabilityResult.result`, shadow real endpoints, keyed by name (not id).
+- End-to-end smoke against [`../uxflows/public/fnol.json`](../uxflows/public/fnol.json): mock_returns for `verify_policy` lands `policy_active=True`, dispatcher emits three `variable_set{method: "capability"}` events, the calc-routed utility flow `flow_route_verified` short-circuits to `flow_incident_details` on the next plan. Full demo without external services.
+
+**Editor follow-up (not in this commit).** The SimulatePanel should grow a "Capability mocks" form parallel to the existing `VariablesForm`, persisted per-agent in localStorage (mirror [`contextVars.ts`](../uxflows/lib/runtime/contextVars.ts)), passed in the `startSession` payload. That's an editor-side change; the runner is already ready to consume it.
+
+### Capability outputs bind to variable scope (shipped 2026-05-18)
+
+Pre-FNOL, v0 fired exit-path `actions` fire-and-forget — the runner ignored capability returns even though `capabilities[].outputs` declares the variable names the capability produces. Surfaced when sketching an FNOL example: `verify_policy` produces `policy_active`, `file_claim` produces `claim_id`, and routing/scripts naturally want to reference both. The shape needed to support this was already in the schema — the prior "no output binding" claim reflected current runner behavior, not a structural constraint.
+
+**Decision.** When an exit-path action fires, the runner writes the capability's returned dict into variable scope keyed by `capabilities[name].outputs`. No schema diff. Sub-decisions implicit in this:
+- **Synchronous dispatch on exit.** The transition blocks on the capability return so the next flow's `entry_condition` can rely on the outputs being present. Voice will have dead air, text will have a stalled cursor — affordances (thinking utterance, typing indicator) land later, not blocking.
+- **Failure → undefined.** If the dispatch fails, outputs don't land; downstream branches use `var != True` to cover both False and undefined.
+- **Implicit-by-name.** Backend returns a flat dict with keys matching declared output names. No nesting syntax, no renaming syntax in v0. Authors avoid collisions by namespacing (`policy_active`, not `active`).
+- **Output-producing actions are a fourth variable-producing mechanism on exit**, alongside the three methods on `assigns`. No new shape — the existing `outputs: ["variable_name"]` already encodes intent.
+
+**Still open (not solved by this).** Mid-conversation dispatch — firing a capability inside a flow so the LLM speaks about the result on the same turn. Covered by SCHEMA.md's "Structured `steps` field" open question. FNOL sidesteps by putting all lookups on flow boundaries; revisit when a spec demands it.
+
+**Downstream changes (landed in this commit).**
+- Runner: [`capabilities.py`](src/uxflows_runner/dispatcher/capabilities.py) — `invoke` is now `async` and returns `(invocation, result)`; the `on_result` callback machinery is gone (events emit at the call site). [`processor.py`](src/uxflows_runner/dispatcher/processor.py) `_do_take_exit` awaits each dispatch, emits `capability_invoked` + `capability_returned`, and writes each declared output into `session.state.variables` with a `variable_set{method: "capability"}` event.
+- [`events/schema.py`](src/uxflows_runner/events/schema.py) — `VariableSet.method` literal extended with `"capability"`. Editor's [`lib/runtime/eventTypes.ts`](../uxflows/lib/runtime/eventTypes.ts) mirror should follow when next touched (additive — existing values still valid).
+- SCHEMA.md: single-line edit to the `exit_paths[].actions` field note.
+- Editor (spec): no change. `outputs` was already authored.
+- Mock-fixture mode for testing — deferred. The existing `httpx.MockTransport` pattern in [`tests/test_capabilities.py`](tests/test_capabilities.py) covers unit testing; end-to-end smoke with a `capability_id → fixture` map can land when an FNOL evaluation harness arrives.
+
+Forcing function: [`../uxflows/public/fnol.txt`](../uxflows/public/fnol.txt) + [`../uxflows/public/fnol.json`](../uxflows/public/fnol.json) — the FNOL spec lives in the editor's canonical example directory (per [SCHEMA.md](../uxflows/SCHEMA.md) convention; `examples/` here keeps only `coffee.json` as the runner's local smoke fixture). See the example for the friction points this decision addresses.
+
 ### Schema coverage
 
 What v0 schema fields the runner honors, with explicit punts. Keeps Phase 1 from quietly dropping behavior.
@@ -253,7 +303,7 @@ What v0 schema fields the runner honors, with explicit punts. Keeps Phase 1 from
 - `flow.exit_paths[].condition` → evaluated in declaration order; `calculation`/`direct` short-circuit; `llm` paths batched into the per-turn LLM call.
 - `flow.exit_paths[].assigns` → evaluated when the exit fires, *not* per-turn. `direct`/`calculation` evaluated locally; `llm` assigns bundled into the per-turn call as function-tool parameters scoped to the chosen exit path. Emits `variable_set` events.
 - **Variables are assigned only on exit-path firing** (v0 schema rule — per-turn captures are v1). Inside a flow, the LLM has the full conversation history and can compose responses using mid-flow user statements, but those values do not enter the runner's variable bag — and are not available to subsequent flows or capability dispatch — until an exit path that names them in `assigns` actually fires.
-- `flow.exit_paths[].actions` → fired post-exit. Inputs resolved implicitly: runtime reads `capabilities[name].inputs` and pulls those variables from scope at fire-time. No explicit input binding syntax. No output binding (fire-and-forget).
+- `flow.exit_paths[].actions` → fired synchronously on exit. Inputs resolved implicitly: runtime reads `capabilities[name].inputs` and pulls those variables from scope at fire-time. Outputs resolved implicitly: runtime writes the capability return dict into scope keyed by `capabilities[name].outputs`, emitting `variable_set{method: "capability"}` for each. Failure → outputs simply don't land (downstream branches use `var != True` / `var == None` to cover both False and undefined). No explicit input/output binding syntax. See [§"Capability outputs bind to variable scope"](#capability-outputs-bind-to-variable-scope-shipped-2026-05-18).
 - `flow.exit_paths[].goto: "END"` → session-terminal. Emits `flow_exited{reason: "terminal"}` then `session_ended{reason: "agent_terminal"}`. A `goto: "RETURN"` from a top-level frame (no caller to pop) also collapses to END.
 - per-frame turn counter on the active stack frame (interrupted turns do not increment the caller's counter). Used for observability today; a future `_turn_count` reserved variable will surface it to spec authors via calculation conditions (see SCHEMA.md Open Questions for the design sketch).
 - `variables` declarations (agent + flow level) → loaded into a typed registry. v0 uses string defaults for `llm`-method extraction tools; typed parameters land in v0.5.
@@ -280,7 +330,7 @@ In v0, the dispatcher implements:
 - `chatbot_initiates`: drives whether the agent or user opens the first turn.
 - per-frame turn counter on the active stack frame; interrupted turns do not increment the caller's counter. Currently observability-only — no auto-routing on a budget. The `flow.max_turns` field that previously consumed this counter was dropped; a future `_turn_count` reserved variable will expose it via calculation conditions (see SCHEMA.md Open Questions).
 - Variables: in-memory dict keyed by name; agent-level and flow-level both flat in the same bag for v0.
-- Capabilities: dispatched by `name` (not `id`). `kind: function` → HTTP POST with implicit input resolution from `capabilities[].inputs`. `kind: retrieval` → stub returning empty context.
+- Capabilities: dispatched by `name` (not `id`), awaited synchronously on exit. `kind: function` → HTTP POST with implicit input resolution from `capabilities[].inputs`; declared `outputs` are read from the response dict and written into variable scope (see [§"Capability outputs bind to variable scope"](#capability-outputs-bind-to-variable-scope-shipped-2026-05-18)). `kind: retrieval` → stub returning empty context.
 
 ### Browser audio glue
 

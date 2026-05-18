@@ -65,7 +65,6 @@ from uxflows_runner.spec.types import Flow
 from . import assigns as assigns_mod
 from . import routing as routing_mod
 from . import routing_protocol
-from .capabilities import CapabilityResult
 from .prompt_builder import build_system_prompt
 from .routing_protocol import RouteTag
 from .session import Session
@@ -483,6 +482,16 @@ async def _apply_decision(
 async def _do_take_exit(
     s: Session, decision: routing_mod.Decision, llm_results: dict[str, Any]
 ) -> None:
+    """Fire an exit: assigns → capability actions (sync await, bind outputs) →
+    state transition.
+
+    Order is deliberate: assigns first so capability inputs see the new values;
+    then each action runs sequentially, with declared `outputs` writing into
+    variable scope as they return. If multiple actions on this exit declare the
+    same output name, last-write-wins — actions execute in the order they
+    appear in `exit_path.actions`. Spec authors avoid collisions by namespacing
+    output names per-capability (e.g., `policy_active`, not `active`).
+    """
     exit_path = decision.exit_path
     source_flow = decision.source_flow
     assert exit_path is not None and source_flow is not None
@@ -507,9 +516,14 @@ async def _do_take_exit(
             )
         )
 
-    # 2) Capabilities — fire-and-forget; results arrive later via callback.
+    # 2) Capabilities — synchronous dispatch so declared outputs land before
+    #    the transition. See RUNNER-PLAN §"Capability outputs bind to variable
+    #    scope" for the rationale.
     for action in exit_path.actions:
-        invocation = s.capabilities.invoke(action.capability_id, s.state.variables)
+        cap = s.spec.capabilities_by_id.get(action.capability_id)
+        invocation, result = await s.capabilities.invoke(
+            action.capability_id, s.state.variables
+        )
         s.events.emit(
             CapabilityInvoked(
                 session_id=s.session_id,
@@ -517,6 +531,33 @@ async def _do_take_exit(
                 args=invocation.args,
             )
         )
+        s.events.emit(
+            CapabilityReturned(
+                session_id=s.session_id,
+                capability_name=result.capability_name,
+                result=result.result,
+                error=result.error,
+            )
+        )
+        # Bind declared outputs into variable scope. Failure → outputs simply
+        # don't land; downstream calculation conditions can branch on
+        # `var != True` / `var == None` to cover both False and undefined.
+        if cap and result.result and isinstance(result.result, dict):
+            for output_name in cap.outputs:
+                if output_name not in result.result:
+                    continue
+                value = result.result[output_name]
+                s.state.variables[output_name] = value
+                s.events.emit(
+                    VariableSet(
+                        session_id=s.session_id,
+                        variable_name=output_name,
+                        value=value,
+                        method="capability",
+                        source_flow_id=source_flow.id,
+                        source_exit_path_id=exit_path.id,
+                    )
+                )
 
     # 3) State + events
     s.events.emit(
@@ -696,20 +737,3 @@ class PostLLMResolver(FrameProcessor):
         if await apply_planned_shortcut(s):
             return
         s.state.increment_turn()
-
-
-def add_capability_result_listener(session: Session) -> None:
-    """Wire the CapabilityDispatcher's on_result callback to emit events.
-    Call once per session after constructing capabilities."""
-
-    def _on_result(result: CapabilityResult) -> None:
-        session.events.emit(
-            CapabilityReturned(
-                session_id=session.session_id,
-                capability_name=result.capability_name,
-                result=result.result,
-                error=result.error,
-            )
-        )
-
-    session.capabilities._on_result = _on_result  # type: ignore[attr-defined]

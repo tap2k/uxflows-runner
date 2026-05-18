@@ -114,10 +114,15 @@ async def webrtc_offer(request: Request):
     # request parser — it errors on unknown keys.
     raw_spec = body.pop("spec", None)
     context_vars = body.pop("context_vars", None)
+    mock_returns = body.pop("mock_returns", None)
     language = body.pop("language", None)
     if context_vars is not None and not isinstance(context_vars, dict):
         raise HTTPException(
             status_code=400, detail="context_vars must be an object"
+        )
+    if mock_returns is not None and not isinstance(mock_returns, dict):
+        raise HTTPException(
+            status_code=400, detail="mock_returns must be an object"
         )
     if language is not None and not isinstance(language, str):
         raise HTTPException(
@@ -138,6 +143,7 @@ async def webrtc_offer(request: Request):
                 execution_config_path=app.state.config.execution_config_path,
                 context_vars=context_vars,
                 language=language,
+                mock_returns=mock_returns,
             )
         )
         app.state.tasks.add(task)
@@ -196,6 +202,12 @@ class StartSessionRequest(BaseModel):
     model: str | None = None
     language: str | None = None
     context_vars: dict[str, Any] | None = None
+    # Per-session simulation fixtures keyed by capability NAME. When a
+    # dispatched capability has a matching entry, the runner returns that
+    # dict instead of hitting an HTTP endpoint. Mirrors the context_vars
+    # pattern — design-time scaffolding for the editor's SimulatePanel,
+    # never in the spec.
+    mock_returns: dict[str, dict[str, Any]] | None = None
 
 
 class StartSessionResponse(BaseModel):
@@ -241,6 +253,7 @@ async def chat_start_session(req: StartSessionRequest) -> StartSessionResponse:
             execution_endpoints=endpoints,
             config=app.state.config,
             context_vars=req.context_vars,
+            mock_returns=req.mock_returns,
         )
     except Exception as exc:  # noqa: BLE001
         # Most likely: invalid API key, network error, or LLM auth failure

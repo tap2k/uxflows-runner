@@ -6,6 +6,19 @@ v0 surface:
     time. JSON body, optional headers from execution config.
   - kind: "retrieval" → stub returning an empty context.
 
+Three sources of capability results, checked in order on each invoke:
+
+  1. **Session mock_returns** — a per-session dict keyed by `capability.name`
+     mapping to an output dict. Shadows endpoints when present. Mirrors the
+     `context_vars` pattern: design-time scaffolding for simulation, NOT in
+     the spec; threaded through the session-start payload from the editor's
+     SimulatePanel. Lets a designer probe happy / sad / unusual capability
+     returns without standing up a mock server.
+  2. **Execution-config endpoints** — sibling JSON, keyed by capability name.
+     For real backends in production.
+  3. **No source configured** — return an error result; outputs simply don't
+     land in variable scope.
+
 Execution config is *not* part of the spec (RUNNER-PLAN: "API keys, endpoints,
 voice IDs → execution config, sibling to spec, never inside"). For v0 it's a
 JSON file alongside the spec, structure:
@@ -16,21 +29,18 @@ JSON file alongside the spec, structure:
     }
   }
 
-Missing entry = the capability isn't actually wired up; we log a warning,
-emit `capability_invoked` + `capability_returned{error}` for the event stream,
-and move on. The conversation does not block.
-
-Fire-and-forget: invoke() returns immediately after scheduling the call. The
-`capability_returned` event arrives later. v0 ordering across multiple
-actions on a single exit is best-effort (RUNNER-PLAN line 281).
+Dispatch is synchronous: `invoke` awaits the HTTP call (or returns the mock)
+and returns the result so the caller can bind declared `outputs` into variable
+scope before the flow transitions (RUNNER-PLAN §"Capability outputs bind to
+variable scope"). The caller is responsible for emitting `capability_invoked`
+/ `capability_returned` / `variable_set` events.
 """
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import httpx
 from loguru import logger
@@ -87,77 +97,93 @@ def resolve_inputs(capability: Capability, variables: dict[str, Any]) -> dict[st
     return {name: variables[name] for name in capability.inputs if name in variables}
 
 
-# Type for the on-result callback the processor passes in to receive
-# capability_returned events. Sync to keep the call site simple.
-ResultCallback = Callable[[CapabilityResult], None]
-
-
 class CapabilityDispatcher:
-    """Owns a per-session httpx client. Schedule fire-and-forget invocations
-    that emit results back via callback when they complete."""
+    """Owns a per-session httpx client. Synchronously dispatches capabilities
+    on exit-path fire so callers can bind declared outputs before the
+    transition completes."""
 
     def __init__(
         self,
         spec: LoadedSpec,
         endpoints: dict[str, CapabilityEndpoint],
-        on_result: ResultCallback | None = None,
         *,
+        mock_returns: dict[str, dict[str, Any]] | None = None,
         client: httpx.AsyncClient | None = None,
         timeout_seconds: float = 8.0,
     ) -> None:
         self._spec = spec
         self._endpoints = endpoints
-        self._on_result = on_result or (lambda _result: None)
+        # Per-session simulation fixtures, keyed by capability NAME (not id).
+        # Mirrors the context_vars pattern — sent via session-start payload,
+        # never lives in the spec.
+        self._mock_returns = mock_returns or {}
+        # Catch designer typos early — a mock keyed by id (instead of name) or
+        # a misspelled name would silently fall through to "no endpoint
+        # configured" with no hint that the mock didn't apply.
+        known_names = set(spec.capabilities_by_name.keys())
+        for cap_name in self._mock_returns:
+            if cap_name not in known_names:
+                logger.warning(
+                    f"mock_returns has unknown capability name {cap_name!r}; "
+                    f"valid names: {sorted(known_names)}"
+                )
         self._client = client or httpx.AsyncClient(timeout=timeout_seconds)
         self._owns_client = client is None
-        self._tasks: set[asyncio.Task[None]] = set()
 
     async def aclose(self) -> None:
-        # Wait for in-flight tasks so capability_returned events still fire,
-        # then close the client.
-        if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
         if self._owns_client:
             await self._client.aclose()
 
-    def invoke(
+    async def invoke(
         self,
         capability_id: str,
         variables: dict[str, Any],
-    ) -> CapabilityInvocation:
+    ) -> tuple[CapabilityInvocation, CapabilityResult]:
         """Look up capability by id (the schema's reference key on actions),
-        resolve inputs, schedule the call. Returns the invocation record so
-        the processor can emit `capability_invoked` immediately."""
+        resolve inputs, await dispatch. Returns (invocation, result) so the
+        caller can emit `capability_invoked` / `capability_returned` events
+        and bind `outputs` into variable scope."""
         cap = self._spec.capabilities_by_id.get(capability_id)
         if cap is None:
             logger.warning(f"capability_id={capability_id!r} not in catalog; skipping")
-            return CapabilityInvocation(capability_name=capability_id, args={})
+            invocation = CapabilityInvocation(capability_name=capability_id, args={})
+            return invocation, CapabilityResult(
+                capability_name=capability_id, error=f"unknown capability_id {capability_id!r}"
+            )
 
         args = resolve_inputs(cap, variables)
         invocation = CapabilityInvocation(capability_name=cap.name, args=args)
+        result = await self._run(cap, args)
+        return invocation, result
 
-        task = asyncio.create_task(self._run(cap, args))
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-        return invocation
+    async def _run(self, cap: Capability, args: dict[str, Any]) -> CapabilityResult:
+        # Session-mock fixture shadows everything else. Designer's SimulatePanel
+        # sets these; production deployments don't.
+        mock = self._mock_returns.get(cap.name)
+        if mock is not None:
+            # Catch the "mock value didn't land" footgun: warn when the mock
+            # dict has keys not in the capability's declared outputs (those
+            # keys won't bind to anything downstream). Don't strip them —
+            # surface as a warning so the designer sees the mismatch.
+            stray = set(mock) - set(cap.outputs)
+            if stray:
+                logger.warning(
+                    f"mock_returns[{cap.name!r}] has keys not in declared "
+                    f"outputs: {sorted(stray)} (declared: {list(cap.outputs)})"
+                )
+            return CapabilityResult(capability_name=cap.name, result=dict(mock))
 
-    async def _run(self, cap: Capability, args: dict[str, Any]) -> None:
         try:
             if cap.kind == "retrieval":
-                # v0 stub — RUNNER-PLAN §"Schema coverage": "kind: retrieval →
-                # stub returning empty context."
-                self._on_result(CapabilityResult(capability_name=cap.name, result={"context": []}))
-                return
+                # v0 stub — real retrieval lands with knowledge tables in v0.5.
+                return CapabilityResult(capability_name=cap.name, result={"context": []})
 
             endpoint = self._endpoints.get(cap.name)
             if endpoint is None:
-                self._on_result(
-                    CapabilityResult(
-                        capability_name=cap.name,
-                        error=f"no endpoint configured for {cap.name!r}",
-                    )
+                return CapabilityResult(
+                    capability_name=cap.name,
+                    error=f"no endpoint configured for {cap.name!r}",
                 )
-                return
 
             response = await self._client.post(
                 endpoint.url, json=args, headers=endpoint.headers
@@ -168,10 +194,10 @@ class CapabilityDispatcher:
                 payload = response.json()
             except ValueError:
                 payload = response.text
-            self._on_result(CapabilityResult(capability_name=cap.name, result=payload))
-        except Exception as exc:  # noqa: BLE001 — capture and surface as event
+            return CapabilityResult(capability_name=cap.name, result=payload)
+        except Exception as exc:  # noqa: BLE001 — capture and surface to caller
             logger.exception(f"capability {cap.name} dispatch failed")
-            self._on_result(CapabilityResult(capability_name=cap.name, error=str(exc)))
+            return CapabilityResult(capability_name=cap.name, error=str(exc))
 
 
 # Sync helper for tests / non-async contexts.
